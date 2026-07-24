@@ -15,6 +15,18 @@ function TestHarness() {
   );
 }
 
+function makeMockEthereum(initialAddress) {
+  const listeners = {};
+  return {
+    request: vi.fn().mockResolvedValue([initialAddress]),
+    on: vi.fn((event, handler) => {
+      listeners[event] = handler;
+    }),
+    removeListener: vi.fn(),
+    __trigger: (event, ...args) => listeners[event]?.(...args),
+  };
+}
+
 const ORIGINAL_ETHEREUM = global.window.ethereum;
 
 beforeEach(() => {
@@ -50,11 +62,9 @@ describe("Header — wallet connection", () => {
     });
   });
 
-  it("connects and displays a truncated address when a wallet is present", async () => {
+  it("connects and displays a truncated address, replacing Connect with a Disconnect button", async () => {
     const fakeAddress = "0x1234567890abcdef1234567890abcdef12345678";
-    global.window.ethereum = {
-      request: vi.fn().mockResolvedValue([fakeAddress]),
-    };
+    global.window.ethereum = { request: vi.fn().mockResolvedValue([fakeAddress]) };
 
     render(
       <GrantOSProvider>
@@ -68,8 +78,10 @@ describe("Header — wallet connection", () => {
       expect(global.window.ethereum.request).toHaveBeenCalledWith({ method: "eth_requestAccounts" });
     });
     await waitFor(() => {
-      expect(screen.getByTestId("connect-btn").textContent).toMatch(/0x1234…5678/);
+      expect(screen.getByTestId("account-pill").textContent).toMatch(/0x1234…5678/);
     });
+    expect(screen.getByTestId("disconnect-btn")).toBeInTheDocument();
+    expect(screen.queryByTestId("connect-btn")).not.toBeInTheDocument();
   });
 
   it("propagates a wallet rejection as a visible error instead of failing silently", async () => {
@@ -123,24 +135,126 @@ describe("Header — wallet connection", () => {
   });
 });
 
+describe("Header — wallet disconnect (real, user-initiated)", () => {
+  // These test the actual disconnect feature: a real EIP-2255
+  // wallet_revokePermissions call (MetaMask's own documented mechanism for a
+  // dApp-initiated "log out"), with local state always cleared regardless of
+  // whether the wallet supports that call.
+
+  it("calls wallet_revokePermissions and returns to the disconnected state when the wallet supports it", async () => {
+    const addr = "0x1111111111111111111111111111111111111a";
+    const revokeSpy = vi.fn().mockResolvedValue(undefined);
+    global.window.ethereum = {
+      request: vi.fn((args) => {
+        if (args.method === "eth_requestAccounts") return Promise.resolve([addr]);
+        if (args.method === "wallet_revokePermissions") return revokeSpy(args);
+        return Promise.reject(new Error("unsupported"));
+      }),
+      on: vi.fn(),
+      removeListener: vi.fn(),
+    };
+
+    render(
+      <GrantOSProvider>
+        <Header />
+      </GrantOSProvider>
+    );
+    fireEvent.click(screen.getByTestId("connect-btn"));
+    await waitFor(() => expect(screen.getByTestId("disconnect-btn")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("disconnect-btn"));
+
+    await waitFor(() => {
+      expect(revokeSpy).toHaveBeenCalledWith({
+        method: "wallet_revokePermissions",
+        params: [{ eth_accounts: {} }],
+      });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("connect-btn")).toBeInTheDocument();
+      expect(screen.getByTestId("connect-btn").textContent).toBe("Connect Wallet");
+    });
+    expect(screen.queryByTestId("account-pill")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("disconnect-btn")).not.toBeInTheDocument();
+    expect(screen.getByTestId("wallet-notice").textContent).toMatch(/^Wallet disconnected\.$/);
+  });
+
+  it("still clears local state and returns to Connect Wallet even if the wallet doesn't support wallet_revokePermissions", async () => {
+    const addr = "0x1111111111111111111111111111111111111a";
+    global.window.ethereum = {
+      // Older/simpler wallets: eth_requestAccounts works, but
+      // wallet_revokePermissions isn't implemented and rejects.
+      request: vi.fn((args) => {
+        if (args.method === "eth_requestAccounts") return Promise.resolve([addr]);
+        return Promise.reject(new Error("Method not supported"));
+      }),
+      on: vi.fn(),
+      removeListener: vi.fn(),
+    };
+
+    render(
+      <GrantOSProvider>
+        <Header />
+      </GrantOSProvider>
+    );
+    fireEvent.click(screen.getByTestId("connect-btn"));
+    await waitFor(() => expect(screen.getByTestId("disconnect-btn")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("disconnect-btn"));
+
+    await waitFor(() => {
+      expect(screen.getByTestId("connect-btn")).toBeInTheDocument();
+    });
+    expect(screen.queryByTestId("account-pill")).not.toBeInTheDocument();
+    // Still tells the truth: this wallet doesn't support real revocation.
+    expect(screen.getByTestId("wallet-notice").textContent).toMatch(/doesn't support revoking permissions/i);
+  });
+
+  it("shows 'Disconnecting…' while the request is in flight", async () => {
+    const addr = "0x1111111111111111111111111111111111111a";
+    let resolveRevoke;
+    global.window.ethereum = {
+      request: vi.fn((args) => {
+        if (args.method === "eth_requestAccounts") return Promise.resolve([addr]);
+        if (args.method === "wallet_revokePermissions") {
+          return new Promise((resolve) => { resolveRevoke = resolve; });
+        }
+        return Promise.reject(new Error("unsupported"));
+      }),
+      on: vi.fn(),
+      removeListener: vi.fn(),
+    };
+
+    render(
+      <GrantOSProvider>
+        <Header />
+      </GrantOSProvider>
+    );
+    fireEvent.click(screen.getByTestId("connect-btn"));
+    await waitFor(() => expect(screen.getByTestId("disconnect-btn")).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId("disconnect-btn"));
+    await waitFor(() => expect(screen.getByTestId("disconnect-btn").textContent).toBe("Disconnecting…"));
+
+    resolveRevoke();
+    await waitFor(() => expect(screen.getByTestId("connect-btn")).toBeInTheDocument());
+  });
+
+  it("does nothing (no crash) if disconnect is somehow triggered with no wallet present", async () => {
+    // Defensive case: shouldn't be reachable via the UI (button only shows
+    // when connected), but the underlying disconnectWallet() API should
+    // still degrade gracefully rather than throw.
+    const { disconnectWallet } = await import("../../lib/genlayerClient");
+    await expect(disconnectWallet()).resolves.toBe(false);
+  });
+});
+
 describe("Header — wallet account/network change events (regression)", () => {
   // Regression tests for a real gap: the app never listened for MetaMask's
   // accountsChanged/chainChanged events at all, so switching accounts or
   // networks in the wallet extension left the UI silently pointed at a
-  // stale account -- still showing "Connected: 0xOLD…" while any write
-  // would go out under whatever the wallet actually resolves at call time.
-
-  function makeMockEthereum(initialAddress) {
-    const listeners = {};
-    return {
-      request: vi.fn().mockResolvedValue([initialAddress]),
-      on: vi.fn((event, handler) => {
-        listeners[event] = handler;
-      }),
-      removeListener: vi.fn(),
-      __trigger: (event, ...args) => listeners[event]?.(...args),
-    };
-  }
+  // stale account -- still showing the old address while any write would
+  // go out under whatever the wallet actually resolves at call time.
 
   it("updates the displayed account when accountsChanged fires with a new address", async () => {
     const addr1 = "0x1111111111111111111111111111111111111a";
@@ -154,18 +268,18 @@ describe("Header — wallet account/network change events (regression)", () => {
     );
     fireEvent.click(screen.getByTestId("connect-btn"));
     await waitFor(() => {
-      expect(screen.getByTestId("connect-btn").textContent).toMatch(/0x1111…111a/);
+      expect(screen.getByTestId("account-pill").textContent).toMatch(/0x1111…111a/);
     });
 
     act(() => global.window.ethereum.__trigger("accountsChanged", [addr2]));
 
     await waitFor(() => {
-      expect(screen.getByTestId("connect-btn").textContent).toMatch(/0x2222…222b/);
+      expect(screen.getByTestId("account-pill").textContent).toMatch(/0x2222…222b/);
     });
     expect(screen.getByTestId("wallet-notice").textContent).toMatch(/Switched to account/);
   });
 
-  it("clears the connection when accountsChanged fires with no accounts (wallet disconnected)", async () => {
+  it("clears the connection when accountsChanged fires with no accounts (wallet disconnected from the wallet's own UI)", async () => {
     const addr1 = "0x1111111111111111111111111111111111111a";
     global.window.ethereum = makeMockEthereum(addr1);
 
@@ -175,13 +289,14 @@ describe("Header — wallet account/network change events (regression)", () => {
       </GrantOSProvider>
     );
     fireEvent.click(screen.getByTestId("connect-btn"));
-    await waitFor(() => expect(screen.getByTestId("connect-btn").textContent).toMatch(/0x1111…111a/));
+    await waitFor(() => expect(screen.getByTestId("account-pill")).toBeInTheDocument());
 
     act(() => global.window.ethereum.__trigger("accountsChanged", []));
 
     await waitFor(() => {
       expect(screen.getByTestId("connect-btn").textContent).toBe("Connect Wallet");
     });
+    expect(screen.queryByTestId("account-pill")).not.toBeInTheDocument();
     expect(screen.getByTestId("wallet-notice").textContent).toMatch(/disconnected/i);
   });
 
@@ -195,7 +310,7 @@ describe("Header — wallet account/network change events (regression)", () => {
       </GrantOSProvider>
     );
     fireEvent.click(screen.getByTestId("connect-btn"));
-    await waitFor(() => expect(screen.getByTestId("connect-btn").textContent).toMatch(/0x1111…111a/));
+    await waitFor(() => expect(screen.getByTestId("account-pill")).toBeInTheDocument());
 
     act(() => global.window.ethereum.__trigger("chainChanged", "0x999"));
 

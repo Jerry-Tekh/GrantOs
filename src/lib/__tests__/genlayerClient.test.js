@@ -1,5 +1,5 @@
 // src/lib/__tests__/genlayerClient.test.js
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   createGrant,
   submitMilestone,
@@ -15,6 +15,7 @@ import {
   normalizeAddress,
   checkCallPreconditions,
   formatAmount,
+  disconnectWallet,
 } from "../genlayerClient";
 
 function fakeClient(overrides = {}) {
@@ -321,5 +322,35 @@ describe("waitForAccepted", () => {
     const client = fakeClient();
     await waitForAccepted(client, "0xTX");
     expect(client.waitForTransactionReceipt).toHaveBeenCalledWith({ hash: "0xTX", status: TransactionStatus.ACCEPTED });
+  });
+});
+
+describe("disconnectWallet", () => {
+  const ORIGINAL_ETHEREUM = global.window.ethereum;
+  afterEach(() => {
+    global.window.ethereum = ORIGINAL_ETHEREUM;
+  });
+
+  it("calls the real EIP-2255 wallet_revokePermissions method with the correct shape", async () => {
+    const requestSpy = vi.fn().mockResolvedValue(undefined);
+    global.window.ethereum = { request: requestSpy };
+
+    const result = await disconnectWallet();
+
+    expect(requestSpy).toHaveBeenCalledWith({
+      method: "wallet_revokePermissions",
+      params: [{ eth_accounts: {} }],
+    });
+    expect(result).toBe(true);
+  });
+
+  it("returns false (not an error) when the wallet doesn't support revocation", async () => {
+    global.window.ethereum = { request: vi.fn().mockRejectedValue(new Error("Method not found")) };
+    await expect(disconnectWallet()).resolves.toBe(false);
+  });
+
+  it("returns false when there is no wallet at all, without throwing", async () => {
+    delete global.window.ethereum;
+    await expect(disconnectWallet()).resolves.toBe(false);
   });
 });

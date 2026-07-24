@@ -453,6 +453,155 @@ interactive elements under the 32px tap-target floor at any of them.
 Final tally after this pass: 80 tests (up from 73), 57 contract tests (up
 from 54), clean build, clean lint.
 
+## Seventh pass — full redesign: landing page + new visual system
+
+A request for a real marketing landing page and a design the user actually
+likes, with an explicit reference: grant-os.com. Worth being upfront about
+one thing before the rest of this section: **that site belongs to a real,
+live, unrelated company** -- its own product, trademark, copy, and images.
+I didn't clone it. Copying another company's proprietary design and content
+crosses into their trade dress/IP, and it'd mean shipping this project as a
+lookalike of an existing commercial product under the same name. What I did
+instead was build an original landing page in the same genre (hero -> problem
+-> how-it-works -> features -> CTA), grounded in what this product actually
+does, with honest copy -- no fabricated testimonials, no invented user counts,
+no borrowed images.
+
+### The actual design decision
+
+The previous design (warm cream background, serif body text, terracotta/amber
+accent) pattern-matches closely to a well-known "default AI-generated design"
+look. Rather than reskin colors, the redesign started from the one truly
+distinctive thing about this product: **multiple independent validators each
+check the same evidence and must agree before funds move.** That idea drives
+the whole system:
+
+- **The signature visual** is the hero verification diagram -- the real
+  mechanism (Evidence submitted -> Validators verify independently -> Consensus
+  reached -> Funds released automatically), not a generic illustration or a
+  dashboard mockup. It's also woven into the brand mark itself (three
+  validator nodes converging into a checkmark), so the tab icon, header, and
+  hero all read as one idea instead of a logo bolted onto unrelated hero art.
+- **Palette**: cool porcelain background (not warm cream), deep ink-navy text
+  (not black or brown), and two considered accents doing different jobs -- jade
+  for "verified," brass for "funded" -- instead of one gradient or a single
+  accent color.
+- **Type**: Fraunces (display, real character) + IBM Plex Sans (body,
+  technical precision) + IBM Plex Mono (data/labels), self-hosted via
+  @fontsource for the same reason as before -- no external font CDN to fail
+  or get blocked.
+- **The "How it works" steps and feature list are the real contract
+  behavior** -- sequential milestones, the exact escrow rule, the Equivalence
+  Principle -- not marketing filler. The "Built on GenLayer" section explains
+  Optimistic Democracy and the Equivalence Principle accurately rather than
+  hand-waving "powered by AI."
+
+### What's new, structurally
+
+- LandingPage.jsx (+ VerificationDiagram.jsx, FeatureIcons.jsx) -- the
+  new marketing page.
+- App.jsx now does simple hash-based routing ("#app" shows the product,
+  anything else shows the landing page) -- no router dependency needed for
+  two views. Verified this handles direct deep links to #app, the browser
+  back button via hashchange, and a "Back to site" link from inside the
+  app, all in a real browser, not just jsdom.
+- Every existing app screen (Funder Dashboard, Grantee Submission, Grant
+  Browser) was re-skinned to the same design system rather than left in the
+  old palette bolted onto a new landing page -- so it doesn't feel like a
+  different product once you're past the hero.
+
+### Verified concretely, same standard as every other pass
+
+- Zero console/network errors, all three fonts resolving correctly,
+  confirmed in a real headless browser.
+- Contrast audit found and fixed four real failures introduced by the new
+  palette: .footer-meta and .testnet-note both measured 2.86:1 (using a
+  too-light slate that had no other safe use left afterward), the decorative
+  step numeral in "How it works" measured the same 2.86:1 against even the
+  lower 3:1 large-text bar, and the brass "funded" accent measured 4.22:1
+  everywhere it was used for text (the partial-status pill, the mismatch
+  banner) -- all four re-measured after fixing at 4.75-7.54:1.
+- A real mobile overflow bug: at a 320px viewport (iPhone SE), the footer
+  links didn't wrap and overflowed the viewport by 10px -- found by walking
+  the actual DOM for the exact overflowing element, not guessed at. Fixed and
+  re-verified clean at 320/360/390/768/1024/1400px.
+- The hero diagram's entrance animation was checked two ways: that it
+  actually settles with every node fully visible after its animation
+  completes (not stuck mid-fade), and that prefers-reduced-motion: reduce
+  correctly shows everything immediately with no animation at all.
+- Full launch flow -- clicking through from the landing page hero, arriving
+  at #app, and clicking "Back to site" -- driven in a real browser, not
+  just asserted in jsdom.
+
+Final tally: 96 tests (up from 80), clean build, clean lint.
+
+## Eighth pass — deployability verification + real disconnect
+
+Two asks: verify the contract actually deploys cleanly using GenLayer's own
+tooling, and implement a genuine wallet disconnect (not just connect).
+
+### Contract: verified deployable with the real official linter
+
+skills.genlayer.com turned out to be a Claude Code plugin marketplace
+(confirmed by fetching it directly), not something installable in this
+interface -- same finding as earlier in this project. But the actual tool
+behind that skill, genvm-linter, is a real PyPI package
+(pip install genvm-linter), so I installed and ran it directly. It
+downloads the real GenVM engine and validates against it -- this is the
+authoritative check, well beyond what my own hand-written tests can confirm
+on their own:
+
+```
+Lint passed (3 checks)
+Validation passed  ->  Contract: GrantOS, Methods: 6 (3 view, 3 write)
+No type errors found (genvm-lint typecheck)
+```
+
+The schema command's ABI extraction is an exact match for every
+functionName the React client calls -- independent confirmation of the
+API-mapping check from an earlier pass, this time from GenLayer's own
+tooling rather than my own diffing.
+
+A real bug found in the process: I tried pinning the Depends header to
+an explicit version (py-genlayer:v0.2.16) instead of latest, reasoning
+that latest could resolve unpredictably both now and after deployment.
+That pin actually broke validation outright --
+Failed to load SDK: filename 'runners/py-genlayer/v0/.2.16.tar' not found
+-- because the SDK loader splits the tag on . to build a lookup path, and
+a dotted semver string isn't valid syntax there. Confirmed against real docs
+examples that only three formats are actually valid: latest, test, or a
+specific content-addressed hash. Reverted to latest, re-confirmed clean
+with the linter. Full details in contract/README.md.
+
+### A real, working wallet disconnect
+
+There was no user-initiated disconnect at all before this -- only reactive
+handling when the wallet itself fired a disconnect event. Implemented the
+real thing: a "Disconnect" button that calls EIP-2255's
+wallet_revokePermissions -- the same mechanism MetaMask's own developer
+docs recommend for a dApp-initiated log-out -- and always clears the app's
+local connection state regardless of whether that call succeeds, since older
+wallets don't all support it yet.
+
+Verified in a real headless browser with a realistic mock wallet, not just
+jsdom:
+- Connect then Disconnect, full cycle: after connecting, the header shows
+  a truncated address pill and a Disconnect button (Connect Wallet
+  disappears). Clicking Disconnect genuinely calls wallet_revokePermissions
+  with the correct [{ eth_accounts: {} }] params, confirmed by inspecting
+  the actual call the mock wallet received -- then the pill and Disconnect
+  button disappear, Connect Wallet reappears, and the status dot goes from
+  green back to gray.
+- Graceful degradation: simulated an older wallet that throws
+  { code: -32601, message: 'Method not found' } for
+  wallet_revokePermissions (a realistic wallet error shape, not just a
+  generic Error). Disconnect still clears local state and returns to
+  "Connect Wallet," with an honest notice explaining the wallet doesn't
+  support real revocation rather than pretending it fully disconnected.
+- Zero console errors in either case.
+
+Contract: 57 tests. React: 103 tests (up from 96). Clean build, clean lint.
+
 ## Connecting to your deployed contract
 
 1. Deploy `grantos.py` (see the contract package's `deploy.py`) and note the

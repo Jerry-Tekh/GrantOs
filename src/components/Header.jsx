@@ -5,8 +5,9 @@ import { isValidAddress } from "../lib/genlayerClient";
 import BrandMark from "./BrandMark";
 
 export default function Header() {
-  const { account, connect, connectError, contractAddress, setContractAddress, walletNotice } = useGrantOS();
+  const { account, connect, disconnect, connectError, contractAddress, setContractAddress, walletNotice } = useGrantOS();
   const [isConnecting, setIsConnecting] = useState(false);
+  const [isDisconnecting, setIsDisconnecting] = useState(false);
 
   async function handleConnectClick() {
     setIsConnecting(true);
@@ -21,6 +22,15 @@ export default function Header() {
     }
   }
 
+  async function handleDisconnectClick() {
+    setIsDisconnecting(true);
+    try {
+      await disconnect();
+    } finally {
+      setIsDisconnecting(false);
+    }
+  }
+
   return (
     <header>
       <div className="brand">
@@ -29,6 +39,7 @@ export default function Header() {
           <h1>GrantOS</h1>
         </div>
         <div className="tag">Milestone verification &middot; GenLayer Bradbury Testnet</div>
+        <a className="back-to-site" href="#" data-testid="back-to-site-link">&larr; Back to site</a>
       </div>
       <div className="conn">
         <span className={`status-dot ${account ? "on" : "off"}`} aria-hidden="true" />
@@ -44,19 +55,34 @@ export default function Header() {
             Not a valid contract address
           </span>
         )}
-        <button
-          type="button"
-          className="secondary"
-          onClick={handleConnectClick}
-          disabled={isConnecting}
-          data-testid="connect-btn"
-        >
-          {isConnecting
-            ? "Connecting…"
-            : account
-              ? `Connected: ${account.slice(0, 6)}…${account.slice(-4)}`
-              : "Connect Wallet"}
-        </button>
+
+        {account ? (
+          <>
+            <span className="account-pill" data-testid="account-pill">
+              {account.slice(0, 6)}…{account.slice(-4)}
+            </span>
+            <button
+              type="button"
+              className="secondary"
+              onClick={handleDisconnectClick}
+              disabled={isDisconnecting}
+              data-testid="disconnect-btn"
+            >
+              {isDisconnecting ? "Disconnecting…" : "Disconnect"}
+            </button>
+          </>
+        ) : (
+          <button
+            type="button"
+            className="secondary"
+            onClick={handleConnectClick}
+            disabled={isConnecting}
+            data-testid="connect-btn"
+          >
+            {isConnecting ? "Connecting…" : "Connect Wallet"}
+          </button>
+        )}
+
         {connectError && <span className="msg msg-error conn-error">{connectError}</span>}
         {!connectError && walletNotice && <span className="msg msg-pending conn-error" data-testid="wallet-notice">{walletNotice}</span>}
       </div>

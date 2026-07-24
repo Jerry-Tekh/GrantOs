@@ -1,5 +1,5 @@
 // src/components/__tests__/ErrorBoundary.test.jsx
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "../../App";
@@ -28,6 +28,18 @@ vi.mock("../../lib/genlayerClient", async (importOriginal) => {
   };
 });
 
+beforeEach(() => {
+  window.location.hash = "";
+});
+afterEach(() => {
+  window.location.hash = "";
+});
+
+function enterApp() {
+  render(<App />);
+  fireEvent.click(screen.getByTestId("hero-launch-btn"));
+}
+
 describe("ErrorBoundary", () => {
   it("contains a panel crash instead of blanking the whole app", async () => {
     // Render errors are noisy in test output by design (React logs them);
@@ -37,7 +49,7 @@ describe("ErrorBoundary", () => {
     console.error = () => {};
 
     const user = userEvent.setup();
-    render(<App />);
+    enterApp();
 
     await user.type(screen.getByTestId("contract-address-input"), "0x1234567890123456789012345678901234567890");
     fireEvent.click(screen.getByTestId("tab-browse"));
@@ -64,7 +76,7 @@ describe("ErrorBoundary", () => {
 
     const { fetchGrantBundle } = await import("../../lib/genlayerClient");
     const user = userEvent.setup();
-    render(<App />);
+    enterApp();
 
     await user.type(screen.getByTestId("contract-address-input"), "0x1234567890123456789012345678901234567890");
     fireEvent.click(screen.getByTestId("tab-browse"));

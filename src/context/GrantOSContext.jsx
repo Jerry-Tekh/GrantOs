@@ -1,6 +1,6 @@
 // src/context/GrantOSContext.jsx
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from "react";
-import { connectWallet as connectWalletApi, makeClient } from "../lib/genlayerClient";
+import { connectWallet as connectWalletApi, disconnectWallet as disconnectWalletApi, makeClient } from "../lib/genlayerClient";
 
 const GrantOSContext = createContext(null);
 
@@ -28,6 +28,19 @@ export function GrantOSProvider({ children }) {
       setConnectError(err.message);
       throw err;
     }
+  }, []);
+
+  const disconnect = useCallback(async () => {
+    setConnectError(null);
+    const revoked = await disconnectWalletApi();
+    setAccount(null);
+    setClient(makeClient());
+    hasConnectedRef.current = false;
+    setWalletNotice(
+      revoked
+        ? "Wallet disconnected."
+        : "Disconnected. (Your wallet doesn't support revoking permissions yet, so it may reconnect automatically next time -- you can also disconnect this site from within your wallet's settings.)"
+    );
   }, []);
 
   // Without these listeners, switching accounts or networks in the wallet
@@ -82,6 +95,7 @@ export function GrantOSProvider({ children }) {
     contractAddress,
     setContractAddress,
     connect,
+    disconnect,
     connectError,
     walletNotice,
     isReady: Boolean(account && contractAddress),

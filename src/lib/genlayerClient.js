@@ -35,6 +35,36 @@ export async function connectWallet() {
   return { address, client: makeClient(address) };
 }
 
+/**
+ * Real wallet-side disconnect via EIP-2255's wallet_revokePermissions --
+ * the same mechanism MetaMask's own documentation recommends for a
+ * dApp-initiated "log out." Not every wallet implements it yet (it's a
+ * newer standard), so this is deliberately best-effort: the caller should
+ * always clear its own local connection state regardless of whether this
+ * succeeds, since forgetting the account locally is what actually matters
+ * for the app's own UI, and is the one thing guaranteed to work everywhere.
+ *
+ * Returns true if the wallet actually revoked its permission grant, false
+ * if the method isn't supported (not an error -- just an older wallet).
+ */
+export async function disconnectWallet() {
+  if (typeof window === "undefined" || !window.ethereum?.request) return false;
+  try {
+    await window.ethereum.request({
+      method: "wallet_revokePermissions",
+      params: [{ eth_accounts: {} }],
+    });
+    return true;
+  } catch {
+    // Method not supported, or the wallet rejected it -- not fatal. The
+    // caller still clears local state; a future eth_requestAccounts call
+    // may silently reconnect on wallets that don't support real revocation,
+    // which is a known, documented limitation of the current standard, not
+    // a bug in this app.
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Writes — each mirrors a `@gl.public.write` method in grantos.py
 // ---------------------------------------------------------------------------

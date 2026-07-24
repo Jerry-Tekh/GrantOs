@@ -3,11 +3,12 @@ import { createContext, useContext, useState, useCallback, useEffect, useRef } f
 import { connectWallet as connectWalletApi, disconnectWallet as disconnectWalletApi, makeClient } from "../lib/genlayerClient";
 
 const GrantOSContext = createContext(null);
+const DEFAULT_CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS?.trim() || "";
 
 export function GrantOSProvider({ children }) {
   const [account, setAccount] = useState(null);
   const [client, setClient] = useState(() => makeClient());
-  const [contractAddress, setContractAddress] = useState("");
+  const [contractAddress, setContractAddress] = useState(DEFAULT_CONTRACT_ADDRESS);
   const [connectError, setConnectError] = useState(null);
   const [walletNotice, setWalletNotice] = useState(null);
   // Tracks whether *this app* initiated the connection, so an accountsChanged
@@ -64,7 +65,7 @@ export function GrantOSProvider({ children }) {
       }
       const newAddress = accounts[0];
       setAccount(newAddress);
-      setClient(makeClient(newAddress));
+      setClient(makeClient(newAddress, ethereum));
       setWalletNotice(`Switched to account ${newAddress.slice(0, 6)}…${newAddress.slice(-4)}.`);
     }
 

@@ -562,16 +562,16 @@ functionName the React client calls -- independent confirmation of the
 API-mapping check from an earlier pass, this time from GenLayer's own
 tooling rather than my own diffing.
 
-A real bug found in the process: I tried pinning the Depends header to
-an explicit version (py-genlayer:v0.2.16) instead of latest, reasoning
-that latest could resolve unpredictably both now and after deployment.
-That pin actually broke validation outright --
-Failed to load SDK: filename 'runners/py-genlayer/v0/.2.16.tar' not found
--- because the SDK loader splits the tag on . to build a lookup path, and
-a dotted semver string isn't valid syntax there. Confirmed against real docs
-examples that only three formats are actually valid: latest, test, or a
-specific content-addressed hash. Reverted to latest, re-confirmed clean
-with the linter. Full details in contract/README.md.
+The contract now uses the content-addressed production runner required by the
+official GenLayer contract skill:
+
+```
+py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6
+```
+
+Bradbury rejects local-development aliases such as `latest` and `test`.
+The deployment script also performs a remote schema preflight before spending
+GEN and verifies the finalized source and ABI afterward.
 
 ### A real, working wallet disconnect
 
@@ -604,19 +604,17 @@ Contract: 57 tests. React: 103 tests (up from 96). Clean build, clean lint.
 
 ## Connecting to your deployed contract
 
-1. Deploy `grantos.py` (see the contract package's `deploy.py`) and note the
-   contract address it prints.
-2. `npm run dev`, open the app, click **Connect Wallet** (needs MetaMask or
-   another injected wallet pointed at Bradbury), paste the contract address
-   into the header field.
-3. All three tabs now read/write against your live contract.
+1. Put matching `PRIVATE_KEY` and `WALLET_ADDRESS` values in `.env.local`.
+2. Run `npm run deploy:bradbury`. This uses the existing JavaScript
+   dependencies and does not install packages.
+3. The script writes the verified address to `deployments/bradbury.json` and
+   `VITE_CONTRACT_ADDRESS` in `.env.local`.
+4. Run `npm run dev`, open the app, and click **Connect Wallet**. The app asks
+   MetaMask to add/switch to Bradbury and use the GenLayer wallet Snap.
+5. All three tabs read and write against the verified contract address.
 
 ## What I could not verify from here
 
-I don't have network access to Bradbury's RPC or a browser with a wallet
-extension in this environment, so I could not click through the running app
-against a live deployed contract — only the mocked integration tests above,
-plus confirming the production build actually serves (`vite preview` → HTTP
-200). If you hit a wallet-connection or live-chain issue after deploying,
-that's the one layer this test suite can't reach; everything else — UI logic,
-API call shape, build, lint — has been run for real.
+Browser-wallet behavior is covered with injected-provider tests. Live
+Bradbury deployment evidence is recorded in `deployments/bradbury.json` after
+`npm run deploy:bradbury` succeeds.

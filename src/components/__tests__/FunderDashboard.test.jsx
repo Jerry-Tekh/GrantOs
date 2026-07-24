@@ -138,8 +138,8 @@ describe("FunderDashboard — create grant", () => {
     });
     const args = createGrant.mock.calls[0][2];
     expect(args.grantId).toBe("g1");
-    expect(args.totalAmount).toBe(1000);
-    expect(args.milestones.map((m) => m.amount)).toEqual([400, 600]);
+    expect(args.totalAmount).toBe("1000");
+    expect(args.milestones.map((m) => m.amount)).toEqual(["400", "600"]);
 
     await waitFor(() => {
       expect(screen.getByTestId("create-grant-msg").textContent).toMatch(/created and funded/);

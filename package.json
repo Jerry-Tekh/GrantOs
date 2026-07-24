@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "deploy:bradbury": "node scripts/deploy-bradbury.mjs",
     "lint": "oxlint",
+    "preflight:bradbury": "node scripts/deploy-bradbury.mjs --preflight",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest"

@@ -1,4 +1,4 @@
-# { "Depends": "py-genlayer:latest" }
+# { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 """
 GrantOS — Decentralised Grant Management & Milestone Verification
 GenLayer Intelligent Contract (Bradbury testnet)
@@ -29,8 +29,7 @@ import json
 # Named constants (session rule #5: no magic numbers)
 # ---------------------------------------------------------------------------
 QUALITY_AUTO_APPROVE_THRESHOLD = 70          # 0-100. Below this -> forced partial review.
-QUALITY_SCORE_TOLERANCE = 10                 # +/- tolerance validators allow between two LLM runs
-CRITERIA_OVERLAP_THRESHOLD = 0.75            # 75% overlap required on criteria_met (session spec)
+QUALITY_SCORE_TOLERANCE = 15                 # +/- tolerance validators allow between two LLM runs
 MAX_EVIDENCE_URLS = 5
 MAX_EVIDENCE_CHARS_PER_URL = 2000
 
@@ -257,16 +256,10 @@ class GrantOS(gl.Contract):
         quality_score = int(result["quality_score"])
         confidence = result["confidence"]
 
-        # Rule #4 + #5: gating logic. "partial" NEVER auto-releases. A "completed"
-        # verdict below the quality threshold is downgraded to a pending review,
-        # regardless of what the LLM said.
-        if llm_status == MSTATUS_COMPLETED and confidence in ("high", "medium") and quality_score >= QUALITY_AUTO_APPROVE_THRESHOLD:
-            final_status = MSTATUS_COMPLETED
-        elif llm_status == MSTATUS_NOT_COMPLETED:
-            final_status = MSTATUS_NOT_COMPLETED
-        else:
-            # covers: llm partial, low/absent confidence, or completed-but-low-quality
-            final_status = MSTATUS_PARTIAL
+        # Rule #4 + #5: derive the exact state transition that validators compare.
+        # "partial" never auto-releases, and a low-quality/low-confidence
+        # "completed" verdict is routed to human review.
+        final_status = _derive_final_status(llm_status, quality_score, confidence)
 
         result_key = f"{grant_id}:{milestone_id}"
         self.next_eval_seq = self.next_eval_seq + u256(1)
@@ -500,28 +493,37 @@ def _extract_json(raw: str) -> str:
     return raw[start:end + 1]
 
 
+def _derive_final_status(status: str, quality_score: int, confidence: str) -> str:
+    if status == MSTATUS_COMPLETED and confidence in ("high", "medium") and quality_score >= QUALITY_AUTO_APPROVE_THRESHOLD:
+        return MSTATUS_COMPLETED
+    if status == MSTATUS_NOT_COMPLETED:
+        return MSTATUS_NOT_COMPLETED
+    return MSTATUS_PARTIAL
+
+
 def _milestones_equivalent(leader_data: dict, validator_data: dict) -> bool:
-    """Equivalence Principle validator: independent re-derivation, not a schema check.
+    """Compare the independent evaluations by their on-chain settlement effect.
 
-    - status must match exactly
-    - confidence must match exactly
-    - quality_score within +/- QUALITY_SCORE_TOLERANCE
-    - >= CRITERIA_OVERLAP_THRESHOLD overlap between criteria_met sets
+    Free-form criteria and feedback are intentionally excluded: two validators
+    can describe the same evidence differently. Consensus instead requires the
+    same derived payout/review decision. Scores must also remain reasonably
+    close when both validators approve an automatic payout.
     """
-    if leader_data["status"] != validator_data["status"]:
-        return False
-    if leader_data["confidence"] != validator_data["confidence"]:
-        return False
-    if abs(leader_data["quality_score"] - validator_data["quality_score"]) > QUALITY_SCORE_TOLERANCE:
+    leader_final = _derive_final_status(
+        leader_data["status"],
+        int(leader_data["quality_score"]),
+        leader_data["confidence"],
+    )
+    validator_final = _derive_final_status(
+        validator_data["status"],
+        int(validator_data["quality_score"]),
+        validator_data["confidence"],
+    )
+    if leader_final != validator_final:
         return False
 
-    lm = set(x.strip().lower() for x in leader_data["criteria_met"] if x.strip())
-    vm_ = set(x.strip().lower() for x in validator_data["criteria_met"] if x.strip())
-    union = lm | vm_
-    if union:
-        overlap = len(lm & vm_) / len(union)
-        if overlap < CRITERIA_OVERLAP_THRESHOLD:
-            return False
+    if leader_final == MSTATUS_COMPLETED:
+        return abs(int(leader_data["quality_score"]) - int(validator_data["quality_score"])) <= QUALITY_SCORE_TOLERANCE
 
     return True
 

@@ -2,6 +2,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { testnetBradbury } from "genlayer-js/chains";
 import { GrantOSProvider, useGrantOS } from "../../context/GrantOSContext";
 import Header from "../Header";
 
@@ -15,10 +16,22 @@ function TestHarness() {
   );
 }
 
-function makeMockEthereum(initialAddress) {
+const BRADBURY_CHAIN_ID = `0x${testnetBradbury.id.toString(16)}`;
+const GENLAYER_SNAP_ID = "npm:genlayer-wallet-plugin";
+
+function makeMockEthereum(initialAddress, overrides = {}) {
   const listeners = {};
   return {
-    request: vi.fn().mockResolvedValue([initialAddress]),
+    request: vi.fn((args) => {
+      if (overrides[args.method]) return overrides[args.method](args);
+      if (args.method === "eth_requestAccounts") return Promise.resolve([initialAddress]);
+      if (args.method === "eth_chainId") return Promise.resolve(BRADBURY_CHAIN_ID);
+      if (args.method === "wallet_getSnaps") {
+        return Promise.resolve({ [GENLAYER_SNAP_ID]: { id: GENLAYER_SNAP_ID } });
+      }
+      if (args.method === "wallet_revokePermissions") return Promise.resolve(undefined);
+      return Promise.resolve(undefined);
+    }),
     on: vi.fn((event, handler) => {
       listeners[event] = handler;
     }),
@@ -64,7 +77,7 @@ describe("Header — wallet connection", () => {
 
   it("connects and displays a truncated address, replacing Connect with a Disconnect button", async () => {
     const fakeAddress = "0x1234567890abcdef1234567890abcdef12345678";
-    global.window.ethereum = { request: vi.fn().mockResolvedValue([fakeAddress]) };
+    global.window.ethereum = makeMockEthereum(fakeAddress);
 
     render(
       <GrantOSProvider>
@@ -77,6 +90,8 @@ describe("Header — wallet connection", () => {
     await waitFor(() => {
       expect(global.window.ethereum.request).toHaveBeenCalledWith({ method: "eth_requestAccounts" });
     });
+    expect(global.window.ethereum.request).toHaveBeenCalledWith({ method: "eth_chainId" });
+    expect(global.window.ethereum.request).toHaveBeenCalledWith({ method: "wallet_getSnaps" });
     await waitFor(() => {
       expect(screen.getByTestId("account-pill").textContent).toMatch(/0x1234…5678/);
     });
@@ -85,9 +100,9 @@ describe("Header — wallet connection", () => {
   });
 
   it("propagates a wallet rejection as a visible error instead of failing silently", async () => {
-    global.window.ethereum = {
-      request: vi.fn().mockRejectedValue(new Error("User rejected the request")),
-    };
+    global.window.ethereum = makeMockEthereum(undefined, {
+      eth_requestAccounts: () => Promise.reject(new Error("User rejected the request")),
+    });
 
     render(
       <GrantOSProvider>
@@ -144,15 +159,9 @@ describe("Header — wallet disconnect (real, user-initiated)", () => {
   it("calls wallet_revokePermissions and returns to the disconnected state when the wallet supports it", async () => {
     const addr = "0x1111111111111111111111111111111111111a";
     const revokeSpy = vi.fn().mockResolvedValue(undefined);
-    global.window.ethereum = {
-      request: vi.fn((args) => {
-        if (args.method === "eth_requestAccounts") return Promise.resolve([addr]);
-        if (args.method === "wallet_revokePermissions") return revokeSpy(args);
-        return Promise.reject(new Error("unsupported"));
-      }),
-      on: vi.fn(),
-      removeListener: vi.fn(),
-    };
+    global.window.ethereum = makeMockEthereum(addr, {
+      wallet_revokePermissions: (args) => revokeSpy(args),
+    });
 
     render(
       <GrantOSProvider>
@@ -181,16 +190,9 @@ describe("Header — wallet disconnect (real, user-initiated)", () => {
 
   it("still clears local state and returns to Connect Wallet even if the wallet doesn't support wallet_revokePermissions", async () => {
     const addr = "0x1111111111111111111111111111111111111a";
-    global.window.ethereum = {
-      // Older/simpler wallets: eth_requestAccounts works, but
-      // wallet_revokePermissions isn't implemented and rejects.
-      request: vi.fn((args) => {
-        if (args.method === "eth_requestAccounts") return Promise.resolve([addr]);
-        return Promise.reject(new Error("Method not supported"));
-      }),
-      on: vi.fn(),
-      removeListener: vi.fn(),
-    };
+    global.window.ethereum = makeMockEthereum(addr, {
+      wallet_revokePermissions: () => Promise.reject(new Error("Method not supported")),
+    });
 
     render(
       <GrantOSProvider>
@@ -213,17 +215,9 @@ describe("Header — wallet disconnect (real, user-initiated)", () => {
   it("shows 'Disconnecting…' while the request is in flight", async () => {
     const addr = "0x1111111111111111111111111111111111111a";
     let resolveRevoke;
-    global.window.ethereum = {
-      request: vi.fn((args) => {
-        if (args.method === "eth_requestAccounts") return Promise.resolve([addr]);
-        if (args.method === "wallet_revokePermissions") {
-          return new Promise((resolve) => { resolveRevoke = resolve; });
-        }
-        return Promise.reject(new Error("unsupported"));
-      }),
-      on: vi.fn(),
-      removeListener: vi.fn(),
-    };
+    global.window.ethereum = makeMockEthereum(addr, {
+      wallet_revokePermissions: () => new Promise((resolve) => { resolveRevoke = resolve; }),
+    });
 
     render(
       <GrantOSProvider>

@@ -9,6 +9,7 @@ import {
   resolvePendingReview,
   checkCallPreconditions,
   formatAmount,
+  formatInputAmount,
   isValidAddress,
 } from "../lib/genlayerClient";
 import EvidenceViewer from "./EvidenceViewer";
@@ -86,7 +87,7 @@ export default function FunderDashboard() {
       }
       const cleaned = milestones
         .filter((m) => m.id.trim())
-        .map((m) => ({ ...m, amount: parseInt(m.amount || "0", 10) }));
+        .map((m) => ({ ...m, amount: m.amount.trim() }));
 
       // Parse totalAmount exactly once and validate it explicitly here --
       // this used to be parsed a second time later with a different (missing)
@@ -96,12 +97,11 @@ export default function FunderDashboard() {
       // clear message. Confirmed concretely before this fix: a blank total
       // amount field genuinely produced `totalAmount: NaN` reaching the
       // write call.
-      if (!totalAmount.trim() || !Number.isFinite(Number(totalAmount))) {
+      if (!totalAmount.trim()) {
         throw new Error("Enter a total amount.");
       }
-      const parsedTotal = parseInt(totalAmount, 10);
 
-      const check = validateMilestoneAmounts(cleaned, parsedTotal);
+      const check = validateMilestoneAmounts(cleaned, totalAmount);
       if (!check.valid) throw new Error(check.error);
 
       setCreateMsg({ text: "Submitting transaction…", kind: "pending" });
@@ -110,7 +110,7 @@ export default function FunderDashboard() {
         grantee,
         description,
         milestones: cleaned,
-        totalAmount: parsedTotal,
+        totalAmount,
       });
       setCreateMsg({ text: `Waiting for consensus… tx: ${txHash}`, kind: "pending" });
       await waitForAccepted(client, txHash);
@@ -210,7 +210,7 @@ export default function FunderDashboard() {
               <input data-testid={`m-id-${i}`} placeholder="ID (M1)" value={m.id} onChange={(e) => updateMilestone(i, "id", e.target.value)} />
               <input data-testid={`m-title-${i}`} placeholder="Title" value={m.title} onChange={(e) => updateMilestone(i, "title", e.target.value)} />
               <input data-testid={`m-criteria-${i}`} placeholder="Success criteria" value={m.criteria} onChange={(e) => updateMilestone(i, "criteria", e.target.value)} />
-              <input data-testid={`m-amount-${i}`} placeholder="Amount" type="number" value={m.amount} onChange={(e) => updateMilestone(i, "amount", e.target.value)} />
+              <input data-testid={`m-amount-${i}`} placeholder="Amount" type="number" min="0" step="any" value={m.amount} onChange={(e) => updateMilestone(i, "amount", e.target.value)} />
               <button type="button" className="remove-m" onClick={() => removeMilestone(i)} aria-label={`Remove milestone ${i + 1}`}>×</button>
             </div>
           ))}
@@ -222,7 +222,7 @@ export default function FunderDashboard() {
         <div className="field">
           <label>Total amount</label>
           <div className="input-with-suffix">
-            <input data-testid="total-amount-input" type="number" value={totalAmount} onChange={(e) => setTotalAmount(e.target.value)} placeholder="1000" />
+            <input data-testid="total-amount-input" type="number" min="0" step="any" value={totalAmount} onChange={(e) => setTotalAmount(e.target.value)} placeholder="1000" />
             <span className="input-suffix">GEN</span>
           </div>
         </div>
@@ -230,7 +230,7 @@ export default function FunderDashboard() {
         {(liveSum > 0 || liveTotal > 0) && (
           <div className={`sum-indicator ${sumMatches ? "match" : "mismatch"}`} data-testid="sum-indicator">
             <span className="sum-indicator-dot" />
-            Milestones sum to <strong>{formatAmount(liveSum)}</strong> · total is <strong>{formatAmount(liveTotal)}</strong>
+            Milestones sum to <strong>{formatInputAmount(liveSum)}</strong> · total is <strong>{formatInputAmount(liveTotal)}</strong>
             {sumMatches ? " — matches" : " — must match exactly"}
           </div>
         )}

@@ -15,6 +15,7 @@ import {
   normalizeAddress,
   checkCallPreconditions,
   formatAmount,
+  parseGenAmount,
   disconnectWallet,
 } from "../genlayerClient";
 
@@ -23,11 +24,13 @@ function fakeClient(overrides = {}) {
     writeContract: vi.fn().mockResolvedValue("0xTXHASH"),
     readContract: vi.fn(),
     waitForTransactionReceipt: vi.fn().mockResolvedValue({ status: "ACCEPTED" }),
+    debugTraceTransaction: vi.fn(),
     ...overrides,
   };
 }
 
 const ADDR = "0xCONTRACT";
+const ATTO_GEN = 10n ** 18n;
 
 describe("createGrant -> create_grant(grant_id, grantee, project_description, milestone_ids, milestone_titles, milestone_criteria, milestone_amounts, total_amount)", () => {
   it("calls writeContract with the exact function name and argument shape the contract expects", async () => {
@@ -57,11 +60,11 @@ describe("createGrant -> create_grant(grant_id, grantee, project_description, mi
       ["M1", "M2"],
       ["Deploy", "Frontend"],
       ["on bradbury", "live demo"],
-      [400, 600],
-      1000,
+      [400n * ATTO_GEN, 600n * ATTO_GEN],
+      1000n * ATTO_GEN,
     ]);
     // payable: value must equal total_amount, sent as a BigInt (matches contract's u256 escrow check)
-    expect(call.value).toBe(1000n);
+    expect(call.value).toBe(1000n * ATTO_GEN);
   });
 
   it("normalizes a valid but non-checksummed grantee address before sending -- confirmed directly that an un-normalized mixed-case address with a bad checksum fails deep inside the underlying SDK with a raw, confusing error", async () => {
@@ -234,18 +237,28 @@ describe("validateMilestoneAmounts — mirrors the on-chain assert in create_gra
 });
 
 describe("formatAmount", () => {
-  it("formats large numbers with thousand separators", () => {
-    expect(formatAmount(1234567)).toBe("1,234,567");
+  it("formats atto-GEN values with thousand separators", () => {
+    expect(formatAmount(1234567n * ATTO_GEN)).toBe("1,234,567");
   });
-  it("leaves small numbers unchanged in appearance", () => {
-    expect(formatAmount(400)).toBe("400");
+  it("formats fractional GEN without losing precision", () => {
+    expect(formatAmount(parseGenAmount("0.125"))).toBe("0.125");
   });
   it("handles zero", () => {
-    expect(formatAmount(0)).toBe("0");
+    expect(formatAmount(0n)).toBe("0");
   });
-  it("falls back to a plain string for non-finite input rather than throwing", () => {
-    expect(formatAmount(NaN)).toBe("NaN");
+  it("falls back to a plain string for invalid input rather than throwing", () => {
     expect(formatAmount(undefined)).toBe("undefined");
+  });
+});
+
+describe("parseGenAmount", () => {
+  it("converts human GEN to 18-decimal atto-GEN", () => {
+    expect(parseGenAmount("1.25")).toBe(1250000000000000000n);
+  });
+
+  it("rejects negative values and more than 18 decimal places", () => {
+    expect(() => parseGenAmount("-1")).toThrow(/non-negative/i);
+    expect(() => parseGenAmount("0.1234567890123456789")).toThrow(/18 decimal/i);
   });
 });
 
@@ -322,6 +335,15 @@ describe("waitForAccepted", () => {
     const client = fakeClient();
     await waitForAccepted(client, "0xTX");
     expect(client.waitForTransactionReceipt).toHaveBeenCalledWith({ hash: "0xTX", status: TransactionStatus.ACCEPTED });
+  });
+
+  it("surfaces execution failure details after consensus accepts a failed transaction", async () => {
+    const client = fakeClient({
+      waitForTransactionReceipt: vi.fn().mockResolvedValue({ txExecutionResultName: "FINISHED_WITH_ERROR" }),
+      debugTraceTransaction: vi.fn().mockResolvedValue({ stderr: "contract reverted" }),
+    });
+
+    await expect(waitForAccepted(client, "0xFAILED")).rejects.toThrow(/contract reverted/i);
   });
 });
 

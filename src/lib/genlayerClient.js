@@ -7,18 +7,22 @@
 
 import { createClient } from "genlayer-js";
 import { testnetBradbury } from "genlayer-js/chains";
-import { TransactionStatus } from "genlayer-js/types";
+import { ExecutionResult, TransactionStatus } from "genlayer-js/types";
+import { formatUnits, getAddress, isAddress, parseUnits } from "viem";
 
 export { TransactionStatus };
+const GEN_DECIMALS = 18;
 
 /**
  * Build a genlayer-js client.
  * @param {string} account - the connected wallet address (from MetaMask), or undefined for read-only use.
+ * @param {object} provider - the injected wallet provider used to sign write transactions.
  */
-export function makeClient(account) {
+export function makeClient(account, provider) {
   return createClient({
     chain: testnetBradbury,
     ...(account ? { account } : {}),
+    ...(provider ? { provider } : {}),
   });
 }
 
@@ -32,7 +36,9 @@ async function requestWalletAccount() {
 
 export async function connectWallet() {
   const address = await requestWalletAccount();
-  return { address, client: makeClient(address) };
+  const client = makeClient(address, window.ethereum);
+  await client.connect("testnetBradbury");
+  return { address, client };
 }
 
 /**
@@ -71,6 +77,8 @@ export async function disconnectWallet() {
 
 /** Mirrors: create_grant(grant_id, grantee, project_description, milestone_ids, milestone_titles, milestone_criteria, milestone_amounts, total_amount) — payable */
 export async function createGrant(client, contractAddress, { grantId, grantee, description, milestones, totalAmount }) {
+  const milestoneAmounts = milestones.map((milestone) => parseGenAmount(milestone.amount));
+  const totalAmountAtto = parseGenAmount(totalAmount);
   const txHash = await client.writeContract({
     address: contractAddress,
     functionName: "create_grant",
@@ -81,10 +89,10 @@ export async function createGrant(client, contractAddress, { grantId, grantee, d
       milestones.map((m) => m.id),
       milestones.map((m) => m.title),
       milestones.map((m) => m.criteria),
-      milestones.map((m) => m.amount),
-      totalAmount,
+      milestoneAmounts,
+      totalAmountAtto,
     ],
-    value: BigInt(totalAmount),
+    value: totalAmountAtto,
   });
   return txHash;
 }
@@ -112,7 +120,19 @@ export async function resolvePendingReview(client, contractAddress, { grantId, m
 }
 
 export async function waitForAccepted(client, txHash) {
-  return client.waitForTransactionReceipt({ hash: txHash, status: TransactionStatus.ACCEPTED });
+  const receipt = await client.waitForTransactionReceipt({ hash: txHash, status: TransactionStatus.ACCEPTED });
+  if (receipt.txExecutionResultName === ExecutionResult.FINISHED_WITH_ERROR) {
+    let detail = "The transaction reached consensus but contract execution failed.";
+    try {
+      const trace = await client.debugTraceTransaction({ hash: txHash });
+      const executionMessage = trace.stderr || trace.stdout;
+      if (executionMessage) detail = executionMessage;
+    } catch {
+      // Keep the stable fallback when trace RPC is unavailable.
+    }
+    throw new Error(detail);
+  }
+  return receipt;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,14 +183,33 @@ export async function fetchGrantBundle(client, contractAddress, grantId) {
 // Client-side validation mirroring on-chain asserts (fail fast before spending gas)
 // ---------------------------------------------------------------------------
 
-/** Consistent thousand-separated formatting for GEN amounts across the app. */
-export function formatAmount(n) {
-  const num = Number(n);
-  if (!Number.isFinite(num)) return String(n);
-  return new Intl.NumberFormat("en-US").format(num);
+/** Convert a human-readable GEN value to its 18-decimal atto-GEN integer. */
+export function parseGenAmount(value) {
+  const text = String(value ?? "").trim();
+  if (!/^\d+(?:\.\d{1,18})?$/.test(text)) {
+    throw new Error("Enter a non-negative GEN amount with no more than 18 decimal places.");
+  }
+  return parseUnits(text, GEN_DECIMALS);
 }
 
-import { isAddress, getAddress } from "viem";
+/** Format an on-chain atto-GEN integer as a human-readable GEN amount. */
+export function formatAmount(value) {
+  try {
+    const [whole, fraction = ""] = formatUnits(BigInt(value), GEN_DECIMALS).split(".");
+    const formattedWhole = new Intl.NumberFormat("en-US").format(BigInt(whole));
+    const trimmedFraction = fraction.replace(/0+$/, "");
+    return trimmedFraction ? `${formattedWhole}.${trimmedFraction}` : formattedWhole;
+  } catch {
+    return String(value);
+  }
+}
+
+/** Format values that are already human-readable, such as form input totals. */
+export function formatInputAmount(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return String(value);
+  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 18 }).format(num);
+}
 
 /**
  * A GenLayer/EVM-style address. Delegates to viem's real EIP-55 checksum
@@ -218,24 +257,37 @@ export function checkCallPreconditions({ contractAddress, account, requireWallet
 /** Mirrors the assert in create_grant: milestone amounts must sum to total_amount exactly. */
 export function validateMilestoneAmounts(milestones, totalAmount) {
   if (milestones.length === 0) {
-    return { valid: false, sum: 0, error: "At least one milestone is required." };
+    return { valid: false, sum: 0n, error: "At least one milestone is required." };
   }
 
-  const badAmount = milestones.find((m) => !Number.isFinite(Number(m.amount)) || Number(m.amount) < 0);
-  if (badAmount) {
+  let milestoneAmounts;
+  try {
+    milestoneAmounts = milestones.map((milestone) => parseGenAmount(milestone.amount));
+  } catch {
     return {
       valid: false,
-      sum: NaN,
-      error: `Milestone "${badAmount.id || "(no id)"}" has an invalid amount. Amounts must be non-negative numbers.`,
+      sum: 0n,
+      error: "Invalid amount. Every milestone must have a non-negative GEN amount.",
     };
   }
-  if (!Number.isFinite(Number(totalAmount))) {
-    return { valid: false, sum: NaN, error: "Total amount must be a valid number." };
+
+  let totalAmountAtto;
+  try {
+    totalAmountAtto = parseGenAmount(totalAmount);
+  } catch {
+    return { valid: false, sum: 0n, error: "Total amount must be a valid number in GEN." };
+  }
+  if (totalAmountAtto <= 0n) {
+    return { valid: false, sum: 0n, error: "Total amount must be greater than zero." };
   }
 
-  const sum = milestones.reduce((s, m) => s + Number(m.amount || 0), 0);
-  if (sum !== Number(totalAmount)) {
-    return { valid: false, sum, error: `Milestone amounts sum to ${sum}, but total is ${totalAmount}. They must match exactly.` };
+  const sum = milestoneAmounts.reduce((current, amount) => current + amount, 0n);
+  if (sum !== totalAmountAtto) {
+    return {
+      valid: false,
+      sum,
+      error: `Milestone amounts sum to ${formatAmount(sum)} GEN, but total is ${formatAmount(totalAmountAtto)} GEN. They must match exactly.`,
+    };
   }
   const ids = milestones.map((m) => m.id);
   if (new Set(ids).size !== ids.length) {

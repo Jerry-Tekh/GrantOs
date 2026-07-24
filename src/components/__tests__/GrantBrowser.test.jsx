@@ -28,8 +28,8 @@ describe("GrantBrowser", () => {
         grantee: "0xGrantee",
         project_description: "Build GrantOS",
         milestones: [
-          { id: "M1", title: "Deploy contract", criteria: "on bradbury", amount: 400 },
-          { id: "M2", title: "Frontend live", criteria: "demoable", amount: 600 },
+          { id: "M1", title: "Deploy contract", criteria: "on bradbury", amount: "400000000000000000000" },
+          { id: "M2", title: "Frontend live", criteria: "demoable", amount: "600000000000000000000" },
         ],
         status: "active",
       },
@@ -37,8 +37,8 @@ describe("GrantBrowser", () => {
         completed_milestones: 1,
         total_milestones: 2,
         progress_pct: 50,
-        amount_released: 400,
-        amount_remaining: 600,
+        amount_released: "400000000000000000000",
+        amount_remaining: "600000000000000000000",
         status: "active",
         pending_review: "",
       },
@@ -75,11 +75,14 @@ describe("GrantBrowser", () => {
     fetchGrantBundle.mockResolvedValue({
       grant: {
         funder: "0xF", grantee: "0xG", project_description: "d", status: "active",
-        milestones: [{ id: "M1", title: "Big milestone", criteria: "c", amount: 1250000 }],
+        milestones: [{ id: "M1", title: "Big milestone", criteria: "c", amount: "1250000000000000000000000" }],
       },
       progress: {
         completed_milestones: 0, total_milestones: 1, progress_pct: 0,
-        amount_released: 2500000, amount_remaining: 1250000, status: "active", pending_review: "",
+        amount_released: "2500000000000000000000000",
+        amount_remaining: "1250000000000000000000000",
+        status: "active",
+        pending_review: "",
       },
       results: {},
     });

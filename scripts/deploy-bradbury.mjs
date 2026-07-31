@@ -21,6 +21,24 @@ const REQUIRED_METHODS = [
   "submit_milestone",
 ];
 
+const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function retryRpc(label, operation, attempts = 12, delayMilliseconds = 5_000) {
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) {
+        console.warn(`${label} attempt ${attempt}/${attempts} failed; retrying: ${error.message}`);
+        await sleep(delayMilliseconds);
+      }
+    }
+  }
+  throw lastError;
+}
+
 function readEnvFile(filePath) {
   if (!fs.existsSync(filePath)) {
     throw new Error(`Missing ${path.relative(ROOT, filePath)}.`);
@@ -99,6 +117,8 @@ async function deploymentFailure(client, hash, receipt) {
 
 async function main() {
   const preflightOnly = process.argv.includes("--preflight");
+  const resumeIndex = process.argv.indexOf("--resume");
+  const resumeHash = resumeIndex >= 0 ? process.argv[resumeIndex + 1] : undefined;
   const env = readEnvFile(ENV_PATH);
   const account = createAccount(normalizePrivateKey(env.PRIVATE_KEY));
   const declaredAddress = getAddress(env.WALLET_ADDRESS);
@@ -128,25 +148,41 @@ async function main() {
     return;
   }
 
-  console.log("Submitting GrantOS deployment to Bradbury...");
-  const txHash = await client.deployContract({
-    code: contractCode,
-    args: [],
-  });
-  console.log(`Deployment transaction: ${txHash}`);
+  let txHash = resumeHash;
+  if (txHash) {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(txHash)) {
+      throw new Error("--resume must be followed by a 32-byte transaction hash.");
+    }
+    console.log(`Resuming verification for deployment transaction: ${txHash}`);
+  } else {
+    console.log("Submitting GrantOS deployment to Bradbury...");
+    txHash = await client.deployContract({
+      code: contractCode,
+      args: [],
+    });
+    console.log(`Deployment transaction: ${txHash}`);
+  }
 
-  const receipt = await client.waitForTransactionReceipt({
-    hash: txHash,
-    status: TransactionStatus.FINALIZED,
-    interval: 5_000,
-    retries: 240,
-  });
+  const receipt = await retryRpc(
+    "Finalized receipt",
+    () =>
+      client.waitForTransactionReceipt({
+        hash: txHash,
+        status: TransactionStatus.FINALIZED,
+        interval: 5_000,
+        retries: 240,
+      }),
+    12,
+    5_000,
+  );
 
   if (receipt.txExecutionResultName !== ExecutionResult.FINISHED_WITH_RETURN) {
     await deploymentFailure(client, txHash, receipt);
   }
 
-  const transaction = receipt.txDataDecoded ? receipt : await client.getTransaction({ hash: txHash });
+  const transaction = receipt.txDataDecoded
+    ? receipt
+    : await retryRpc("Transaction details", () => client.getTransaction({ hash: txHash }));
   const contractAddress =
     transaction.txDataDecoded?.contractAddress ??
     transaction.recipient ??
@@ -157,8 +193,8 @@ async function main() {
   }
 
   const [deployedCode, deployedSchema] = await Promise.all([
-    client.getContractCode(contractAddress),
-    client.getContractSchema(contractAddress),
+    retryRpc("Deployed source", () => client.getContractCode(contractAddress)),
+    retryRpc("Deployed schema", () => client.getContractSchema(contractAddress)),
   ]);
   if (deployedCode.trim() !== contractCode.trim()) {
     throw new Error("The deployed source code does not match contract/grantos.py.");
@@ -170,6 +206,15 @@ async function main() {
     throw new Error(`Deployed schema is missing methods: ${missingDeployedMethods.join(", ")}`);
   }
 
+  let existingDeployment = {};
+  if (fs.existsSync(DEPLOYMENT_PATH)) {
+    try {
+      existingDeployment = JSON.parse(fs.readFileSync(DEPLOYMENT_PATH, "utf8"));
+    } catch {
+      // Replace an unreadable local record after live verification succeeds.
+    }
+  }
+
   const deployment = {
     network: "testnet-bradbury",
     contract: "GrantOS",
@@ -178,6 +223,9 @@ async function main() {
     deployedAt: new Date().toISOString(),
     runner: "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6",
     methods: deployedMethods.sort(),
+    ...(existingDeployment.address === contractAddress && existingDeployment.smokeTest
+      ? { smokeTest: existingDeployment.smokeTest }
+      : {}),
   };
 
   fs.mkdirSync(path.dirname(DEPLOYMENT_PATH), { recursive: true });

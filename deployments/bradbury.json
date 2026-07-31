@@ -1,0 +1,23 @@
+{
+  "network": "testnet-bradbury",
+  "contract": "GrantOS",
+  "address": "0x68293343f39B04e7DBeC9eC6A438a39b931B7ce6",
+  "transactionHash": "0x6c86178a679c87c4a38693735355f3acc26f0e8f9021799b2576f43ba5b6b470",
+  "deployedAt": "2026-07-31T14:11:41.212Z",
+  "runner": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6",
+  "methods": [
+    "create_grant",
+    "get_grant",
+    "get_grant_progress",
+    "get_milestone_result",
+    "resolve_pending_review",
+    "submit_milestone"
+  ],
+  "smokeTest": {
+    "transactionHash": "0x11262e5ced34c195a9cfae4ad4cd0f5229e72fde33d4a2320272e829d1223c9b",
+    "grantId": "grantos-smoke-1785507191402",
+    "valueAttoGen": "1",
+    "executionResult": "FINISHED_WITH_RETURN",
+    "stateVerified": true
+  }
+}

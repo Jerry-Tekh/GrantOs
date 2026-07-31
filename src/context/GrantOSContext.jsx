@@ -3,7 +3,8 @@ import { createContext, useContext, useState, useCallback, useEffect, useRef } f
 import { connectWallet as connectWalletApi, disconnectWallet as disconnectWalletApi, makeClient } from "../lib/genlayerClient";
 
 const GrantOSContext = createContext(null);
-const DEFAULT_CONTRACT_ADDRESS = import.meta.env.VITE_CONTRACT_ADDRESS?.trim() || "";
+const DEFAULT_CONTRACT_ADDRESS =
+  import.meta.env.MODE === "test" ? "" : import.meta.env.VITE_CONTRACT_ADDRESS?.trim() || "";
 
 export function GrantOSProvider({ children }) {
   const [account, setAccount] = useState(null);

@@ -604,6 +604,14 @@ Contract: 57 tests. React: 103 tests (up from 96). Clean build, clean lint.
 
 ## Connecting to your deployed contract
 
+Current verified Bradbury deployment:
+
+- Contract: `0x68293343f39B04e7DBeC9eC6A438a39b931B7ce6`
+- Deployment transaction: `0x6c86178a679c87c4a38693735355f3acc26f0e8f9021799b2576f43ba5b6b470`
+- Live payable/storage smoke transaction: `0x11262e5ced34c195a9cfae4ad4cd0f5229e72fde33d4a2320272e829d1223c9b`
+
+The machine-readable evidence is in `deployments/bradbury.json`.
+
 1. Put matching `PRIVATE_KEY` and `WALLET_ADDRESS` values in `.env.local`.
 2. Run `npm run deploy:bradbury`. This uses the existing JavaScript
    dependencies and does not install packages.

@@ -45,6 +45,13 @@ not install anything. On success it:
 2. Adds `VITE_CONTRACT_ADDRESS` to `.env.local`.
 3. Lets the frontend start with the deployed address already selected.
 
+If Bradbury temporarily drops an RPC request after the transaction has already
+been submitted, resume the same transaction instead of deploying twice:
+
+```bash
+npm run deploy:bradbury -- --resume 0xTRANSACTION_HASH
+```
+
 ## Contract tests
 
 The direct-mode tests require the optional `gltest` tooling:

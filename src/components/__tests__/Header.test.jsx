@@ -17,7 +17,6 @@ function TestHarness() {
 }
 
 const BRADBURY_CHAIN_ID = `0x${testnetBradbury.id.toString(16)}`;
-const GENLAYER_SNAP_ID = "npm:genlayer-wallet-plugin";
 
 function makeMockEthereum(initialAddress, overrides = {}) {
   const listeners = {};
@@ -26,9 +25,6 @@ function makeMockEthereum(initialAddress, overrides = {}) {
       if (overrides[args.method]) return overrides[args.method](args);
       if (args.method === "eth_requestAccounts") return Promise.resolve([initialAddress]);
       if (args.method === "eth_chainId") return Promise.resolve(BRADBURY_CHAIN_ID);
-      if (args.method === "wallet_getSnaps") {
-        return Promise.resolve({ [GENLAYER_SNAP_ID]: { id: GENLAYER_SNAP_ID } });
-      }
       if (args.method === "wallet_revokePermissions") return Promise.resolve(undefined);
       return Promise.resolve(undefined);
     }),
@@ -91,12 +87,83 @@ describe("Header — wallet connection", () => {
       expect(global.window.ethereum.request).toHaveBeenCalledWith({ method: "eth_requestAccounts" });
     });
     expect(global.window.ethereum.request).toHaveBeenCalledWith({ method: "eth_chainId" });
-    expect(global.window.ethereum.request).toHaveBeenCalledWith({ method: "wallet_getSnaps" });
+    expect(global.window.ethereum.request).not.toHaveBeenCalledWith({ method: "wallet_getSnaps" });
     await waitFor(() => {
       expect(screen.getByTestId("account-pill").textContent).toMatch(/0x1234…5678/);
     });
     expect(screen.getByTestId("disconnect-btn")).toBeInTheDocument();
     expect(screen.queryByTestId("connect-btn")).not.toBeInTheDocument();
+  });
+
+  it("connects when wallet_getSnaps is unsupported because wallet connection no longer requests it", async () => {
+    const fakeAddress = "0x1234567890abcdef1234567890abcdef12345678";
+    global.window.ethereum = makeMockEthereum(fakeAddress, {
+      wallet_getSnaps: () => Promise.reject(new Error("method wallet_getSnaps doesn't have a corresponding handler")),
+    });
+
+    render(
+      <GrantOSProvider>
+        <Header />
+      </GrantOSProvider>
+    );
+    fireEvent.click(screen.getByTestId("connect-btn"));
+
+    await waitFor(() => expect(screen.getByTestId("account-pill")).toBeInTheDocument());
+    expect(global.window.ethereum.request).not.toHaveBeenCalledWith({ method: "wallet_getSnaps" });
+  });
+
+  it("switches an existing wallet network to Bradbury", async () => {
+    const fakeAddress = "0x1234567890abcdef1234567890abcdef12345678";
+    const switchNetwork = vi.fn().mockResolvedValue(undefined);
+    global.window.ethereum = makeMockEthereum(fakeAddress, {
+      eth_chainId: () => Promise.resolve("0x1"),
+      wallet_switchEthereumChain: switchNetwork,
+    });
+
+    render(
+      <GrantOSProvider>
+        <Header />
+      </GrantOSProvider>
+    );
+    fireEvent.click(screen.getByTestId("connect-btn"));
+
+    await waitFor(() => expect(screen.getByTestId("account-pill")).toBeInTheDocument());
+    expect(switchNetwork).toHaveBeenCalledWith({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: BRADBURY_CHAIN_ID }],
+    });
+  });
+
+  it("adds Bradbury when the wallet does not know the chain yet", async () => {
+    const fakeAddress = "0x1234567890abcdef1234567890abcdef12345678";
+    const missingChainError = Object.assign(new Error("Unrecognized chain"), { code: 4902 });
+    const switchNetwork = vi.fn().mockRejectedValueOnce(missingChainError).mockResolvedValue(undefined);
+    const addNetwork = vi.fn().mockResolvedValue(undefined);
+    global.window.ethereum = makeMockEthereum(fakeAddress, {
+      eth_chainId: () => Promise.resolve("0x1"),
+      wallet_switchEthereumChain: switchNetwork,
+      wallet_addEthereumChain: addNetwork,
+    });
+
+    render(
+      <GrantOSProvider>
+        <Header />
+      </GrantOSProvider>
+    );
+    fireEvent.click(screen.getByTestId("connect-btn"));
+
+    await waitFor(() => expect(screen.getByTestId("account-pill")).toBeInTheDocument());
+    expect(addNetwork).toHaveBeenCalledWith({
+      method: "wallet_addEthereumChain",
+      params: [
+        expect.objectContaining({
+          chainId: BRADBURY_CHAIN_ID,
+          rpcUrls: expect.any(Array),
+          nativeCurrency: expect.objectContaining({ symbol: "GEN" }),
+        }),
+      ],
+    });
+    expect(switchNetwork).toHaveBeenCalledTimes(2);
   });
 
   it("propagates a wallet rejection as a visible error instead of failing silently", async () => {

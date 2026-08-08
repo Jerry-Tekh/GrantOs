@@ -617,8 +617,9 @@ The machine-readable evidence is in `deployments/bradbury.json`.
    dependencies and does not install packages.
 3. The script writes the verified address to `deployments/bradbury.json` and
    `VITE_CONTRACT_ADDRESS` in `.env.local`.
-4. Run `npm run dev`, open the app, and click **Connect Wallet**. The app asks
-   MetaMask to add/switch to Bradbury and use the GenLayer wallet Snap.
+4. Run `npm run dev`, open the app, and click **Connect Wallet**. The app uses
+   standard injected-wallet methods to add or switch to Bradbury; MetaMask
+   Snaps are not required.
 5. All three tabs read and write against the verified contract address.
 
 ## What I could not verify from here

@@ -26,6 +26,59 @@ export function makeClient(account, provider) {
   });
 }
 
+function bradburyChainParams() {
+  return {
+    chainId: `0x${testnetBradbury.id.toString(16)}`,
+    chainName: testnetBradbury.name,
+    rpcUrls: [...testnetBradbury.rpcUrls.default.http],
+    nativeCurrency: testnetBradbury.nativeCurrency,
+    ...(testnetBradbury.blockExplorers?.default?.url
+      ? { blockExplorerUrls: [testnetBradbury.blockExplorers.default.url] }
+      : {}),
+  };
+}
+
+function isMissingChainError(error) {
+  const code = error?.code ?? error?.data?.originalError?.code;
+  return code === 4902 || /unrecognized chain|unknown chain|chain.*not added/i.test(error?.message ?? "");
+}
+
+/**
+ * Ensure the injected wallet is on Bradbury using standard EIP-1193 methods.
+ * This deliberately avoids genlayer-js client.connect(), which also requests
+ * MetaMask Snaps and fails on otherwise-compatible wallets that do not expose
+ * wallet_getSnaps.
+ */
+export async function ensureBradburyNetwork(provider) {
+  const chain = bradburyChainParams();
+  const currentChainId = await provider.request({ method: "eth_chainId" });
+  if (String(currentChainId).toLowerCase() === chain.chainId.toLowerCase()) return;
+
+  try {
+    await provider.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: chain.chainId }],
+    });
+  } catch (error) {
+    if (!isMissingChainError(error)) {
+      throw new Error(`Could not switch your wallet to GenLayer Bradbury: ${error.message}`);
+    }
+
+    try {
+      await provider.request({
+        method: "wallet_addEthereumChain",
+        params: [chain],
+      });
+      await provider.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: chain.chainId }],
+      });
+    } catch (addError) {
+      throw new Error(`Could not add GenLayer Bradbury to your wallet: ${addError.message}`);
+    }
+  }
+}
+
 async function requestWalletAccount() {
   if (typeof window === "undefined" || !window.ethereum) {
     throw new Error("No wallet found. Install MetaMask (or another injected wallet) to continue.");
@@ -36,8 +89,9 @@ async function requestWalletAccount() {
 
 export async function connectWallet() {
   const address = await requestWalletAccount();
-  const client = makeClient(address, window.ethereum);
-  await client.connect("testnetBradbury");
+  const provider = window.ethereum;
+  await ensureBradburyNetwork(provider);
+  const client = makeClient(address, provider);
   return { address, client };
 }
 

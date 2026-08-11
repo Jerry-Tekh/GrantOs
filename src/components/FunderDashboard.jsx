@@ -4,6 +4,7 @@ import { useGrantOS } from "../context/GrantOSContext";
 import {
   createGrant,
   waitForAccepted,
+  waitForGrantVisible,
   validateMilestoneAmounts,
   fetchGrantBundle,
   resolvePendingReview,
@@ -114,7 +115,22 @@ export default function FunderDashboard() {
       });
       setCreateMsg({ text: `Waiting for consensus… tx: ${txHash}`, kind: "pending" });
       await waitForAccepted(client, txHash);
-      setCreateMsg({ text: "Grant created and funded.", kind: "ok" });
+      // A write reaches ACCEPTED a few seconds before a view call can read the
+      // new state. Confirm the grant is actually readable before claiming
+      // success, so the funder's very next "Load Grant" finds it instead of
+      // erroring — the exact bug this dashboard had.
+      setCreateMsg({ text: "Confirming the grant is readable on-chain…", kind: "pending" });
+      const visible = await waitForGrantVisible(client, contractAddress, grantId);
+      setReviewGrantId(grantId);
+      if (visible) {
+        setCreateMsg({ text: "Grant created and funded. Loading it below…", kind: "ok" });
+        await handleLoadReview(grantId);
+      } else {
+        setCreateMsg({
+          text: "Grant created and funded, but it's taking a moment to become readable. Click \"Load Grant\" below in a few seconds.",
+          kind: "ok",
+        });
+      }
     } catch (err) {
       setCreateMsg({ text: `Error: ${err.message}`, kind: "error" });
     } finally {
@@ -123,7 +139,10 @@ export default function FunderDashboard() {
     }
   }
 
-  async function handleLoadReview() {
+  async function handleLoadReview(idArg) {
+    // Called both from the button onClick (receives a click event) and
+    // programmatically right after create (receives the grant id string).
+    const lookupId = typeof idArg === "string" ? idArg : reviewGrantId;
     setReviewMsg({ text: "", kind: "" });
     setReviewBundle(null);
     // Reading a grant's state is a public view call -- it doesn't need a
@@ -133,16 +152,22 @@ export default function FunderDashboard() {
       setReviewMsg({ text: precheck, kind: "error" });
       return;
     }
-    if (!reviewGrantId.trim()) {
+    if (!lookupId.trim()) {
       setReviewMsg({ text: "Enter a grant ID to look up.", kind: "error" });
       return;
     }
     setIsLoadingReview(true);
     try {
-      const bundle = await fetchGrantBundle(client, contractAddress, reviewGrantId);
+      const bundle = await fetchGrantBundle(client, contractAddress, lookupId);
       setReviewBundle(bundle);
-    } catch (err) {
-      setReviewMsg({ text: `Error: ${err.message}`, kind: "error" });
+    } catch {
+      // A read error here is almost always a grant that doesn't exist (or has
+      // not become readable yet). The raw contract error is an unreadable hex
+      // dump, so show a plain-language message instead.
+      setReviewMsg({
+        text: `Couldn't load grant "${lookupId}". Check the ID is correct — if you just created it, wait a few seconds and try again.`,
+        kind: "error",
+      });
     } finally {
       setIsLoadingReview(false);
     }
@@ -251,6 +276,39 @@ export default function FunderDashboard() {
         <button type="button" className="secondary" onClick={handleLoadReview} data-testid="load-review-btn" disabled={isLoadingReview}>
           {isLoadingReview ? "Loading…" : "Load Grant"}
         </button>
+
+        {reviewBundle && (
+          <div className="card grant-card" data-testid="review-grant-summary">
+            <div className="review-card-head">
+              <strong>{reviewGrantId}</strong>
+              {reviewBundle.grant?.status && <StatusPill status={reviewBundle.grant.status} />}
+            </div>
+            {reviewBundle.grant?.grantee && (
+              <div className="hint">Grantee: {reviewBundle.grant.grantee}</div>
+            )}
+            {reviewBundle.grant?.project_description && (
+              <div className="hint">{reviewBundle.grant.project_description}</div>
+            )}
+            {reviewBundle.progress && (
+              <div className="hint">
+                {reviewBundle.progress.completed_milestones ?? 0}/{reviewBundle.progress.total_milestones ?? (reviewBundle.grant?.milestones?.length ?? 0)} milestones complete
+                {reviewBundle.progress.amount_released !== undefined && (
+                  <> · {formatAmount(reviewBundle.progress.amount_released)} released / {formatAmount(reviewBundle.progress.amount_remaining)} remaining</>
+                )}
+              </div>
+            )}
+            {reviewBundle.grant?.milestones?.length > 0 && (
+              <ul className="milestone-mini-list">
+                {reviewBundle.grant.milestones.map((m) => (
+                  <li key={m.id} data-testid={`review-milestone-${m.id}`}>
+                    <span><strong>{m.id}</strong> — {m.title} · {formatAmount(m.amount)} GEN</span>
+                    <StatusPill status={reviewBundle.results?.[m.id]?.final_status} />
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
 
         {reviewBundle && !pendingMilestone && (
           <div className="empty">No milestone pending review on this grant.</div>

@@ -189,6 +189,66 @@ export async function waitForAccepted(client, txHash) {
   return receipt;
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Confirm that a write is actually reflected in contract state before telling
+ * the user it succeeded.
+ *
+ * WHY THIS EXISTS: a write transaction reaches TransactionStatus.ACCEPTED a few
+ * seconds before a fresh `get_grant` view call can see the new state (measured
+ * on Bradbury: ~5s after ACCEPTED). Reporting "created" the instant the receipt
+ * comes back means a user who immediately clicks "Load Grant" gets an
+ * `[EXPECTED] grant not found` error for a grant that really was created — the
+ * exact "the frontend said it worked but the grant isn't there" symptom this
+ * fixes. Polling get_grant until it resolves makes the success message truthful
+ * and guarantees the very next load will find the grant.
+ *
+ * Any read error during the window is treated as "not visible yet, retry" —
+ * we only call this right after a receipt we already know was accepted, so the
+ * grant is expected to exist; the only question is whether the read node has
+ * caught up. Returns true once visible, false if it never appears in budget.
+ */
+export async function waitForGrantVisible(client, contractAddress, grantId, { attempts = 20, delayMs = 2500 } = {}) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      await getGrant(client, contractAddress, grantId);
+      return true;
+    } catch {
+      // Transient during the ACCEPTED -> readable window; keep polling.
+    }
+    await sleep(delayMs);
+  }
+  return false;
+}
+
+/**
+ * Poll get_milestone_result until the AI verdict has actually settled.
+ *
+ * WHY THIS EXISTS: submit_milestone runs the non-deterministic LLM evaluation
+ * (leader + validator via the Equivalence Principle). That path reaches an
+ * ACCEPTED receipt whose execution result can still be NOT_VOTED — validators
+ * have not finished voting — and the milestone result is not yet stored. So the
+ * old flow said "Verification complete" while `get_milestone_result` still
+ * returned `{}`. This polls for the real, non-empty verdict so the grantee is
+ * shown what actually happened (completed / partial / not_completed) instead of
+ * a premature "complete". Returns the result dict, or null if it hasn't settled
+ * within the budget (in which case the caller should say so honestly rather
+ * than claim a verdict).
+ */
+export async function waitForMilestoneResult(client, contractAddress, grantId, milestoneId, { attempts = 30, delayMs = 4000 } = {}) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const result = await getMilestoneResult(client, contractAddress, grantId, milestoneId);
+      if (result && Object.keys(result).length > 0) return result;
+    } catch {
+      // Transient read while consensus is still settling; keep polling.
+    }
+    await sleep(delayMs);
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Reads — each mirrors a `@gl.public.view` method in grantos.py
 // ---------------------------------------------------------------------------

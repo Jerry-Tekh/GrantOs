@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# Local env files — NEVER commit these (they hold private keys / secrets)
+.env
+.env.*
+!.env.example
+
 # Python
 __pycache__/
 *.py[cod]

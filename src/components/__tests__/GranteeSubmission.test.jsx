@@ -16,6 +16,7 @@ vi.mock("../../lib/genlayerClient", async (importOriginal) => {
     ...actual,
     submitMilestone: vi.fn(),
     waitForAccepted: vi.fn().mockResolvedValue({}),
+    waitForMilestoneResult: vi.fn().mockResolvedValue({ final_status: "completed" }),
   };
 });
 

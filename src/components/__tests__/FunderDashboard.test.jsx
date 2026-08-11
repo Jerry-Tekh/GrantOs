@@ -16,6 +16,7 @@ vi.mock("../../lib/genlayerClient", async (importOriginal) => {
     ...actual,
     createGrant: vi.fn(),
     waitForAccepted: vi.fn().mockResolvedValue({}),
+    waitForGrantVisible: vi.fn().mockResolvedValue(true),
     fetchGrantBundle: vi.fn(),
     resolvePendingReview: vi.fn(),
   };

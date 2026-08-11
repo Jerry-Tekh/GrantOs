@@ -1,7 +1,7 @@
 // src/components/GranteeSubmission.jsx
 import { useMemo, useRef, useState } from "react";
 import { useGrantOS } from "../context/GrantOSContext";
-import { submitMilestone, waitForAccepted, checkCallPreconditions } from "../lib/genlayerClient";
+import { submitMilestone, waitForAccepted, waitForMilestoneResult, checkCallPreconditions } from "../lib/genlayerClient";
 import Banner from "./Banner";
 
 export default function GranteeSubmission() {
@@ -53,7 +53,23 @@ export default function GranteeSubmission() {
       });
       setMsg({ text: `Submitted. Validators are evaluating your evidence. tx: ${txHash}`, kind: "pending" });
       await waitForAccepted(client, txHash);
-      setMsg({ text: "Verification complete — check the Grant Browser tab for the result.", kind: "ok" });
+      // The AI evaluation is non-deterministic (leader + validators). The
+      // ACCEPTED receipt can arrive before the verdict is stored, so poll for
+      // the actual result instead of claiming success prematurely.
+      setMsg({ text: "Submitted. Waiting for the AI validators' verdict…", kind: "pending" });
+      const result = await waitForMilestoneResult(client, contractAddress, grantId, milestoneId);
+      if (!result) {
+        setMsg({
+          text: "Submitted and accepted on-chain. The AI verdict is still settling — check the Grant Browser tab shortly for the result.",
+          kind: "ok",
+        });
+      } else {
+        const verdict = result.final_status || result.llm_status || "recorded";
+        setMsg({
+          text: `Verification complete — verdict: ${verdict}. See the Grant Browser tab for the full evaluation.`,
+          kind: "ok",
+        });
+      }
     } catch (err) {
       setMsg({ text: `Error: ${err.message}`, kind: "error" });
     } finally {

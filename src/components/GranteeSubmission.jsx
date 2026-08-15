@@ -4,6 +4,12 @@ import { useGrantOS } from "../context/GrantOSContext";
 import { submitMilestone, waitForAccepted, waitForMilestoneResult, checkCallPreconditions } from "../lib/genlayerClient";
 import Banner from "./Banner";
 
+// Keep in sync with the contract's MAX_EVIDENCE_URLS (contract/grantos.py).
+// The contract only fetches this many evidence URLs inside the leader's
+// non-deterministic block (bounding that work is what prevents a leader
+// timeout during consensus), so sending more would silently drop the extras.
+const MAX_EVIDENCE_URLS = 3;
+
 export default function GranteeSubmission() {
   const { client, account, contractAddress } = useGrantOS();
 
@@ -42,7 +48,7 @@ export default function GranteeSubmission() {
         .split("\n")
         .map((u) => u.trim())
         .filter(Boolean)
-        .slice(0, 5);
+        .slice(0, MAX_EVIDENCE_URLS);
 
       setMsg({ text: "Submitting…", kind: "pending" });
       const txHash = await submitMilestone(client, contractAddress, {
@@ -100,8 +106,8 @@ export default function GranteeSubmission() {
         </div>
         <div className="field">
           <label>
-            Evidence URLs (one per line, up to 5)
-            <span className={`url-count ${urlCount > 5 ? "over" : ""}`}> · {Math.min(urlCount, 5)}/5</span>
+            Evidence URLs (one per line, up to {MAX_EVIDENCE_URLS})
+            <span className={`url-count ${urlCount > MAX_EVIDENCE_URLS ? "over" : ""}`}> · {Math.min(urlCount, MAX_EVIDENCE_URLS)}/{MAX_EVIDENCE_URLS}</span>
           </label>
           <textarea
             data-testid="s-urls"
@@ -109,7 +115,7 @@ export default function GranteeSubmission() {
             onChange={(e) => setUrlsText(e.target.value)}
             placeholder={"https://github.com/you/repo\nhttps://your-demo.example.com"}
           />
-          {urlCount > 5 && <div className="hint hint-warn">Only the first 5 URLs will be submitted.</div>}
+          {urlCount > MAX_EVIDENCE_URLS && <div className="hint hint-warn">Only the first {MAX_EVIDENCE_URLS} URLs will be submitted.</div>}
         </div>
 
         <button type="button" onClick={handleSubmit} data-testid="submit-milestone-btn" disabled={isSubmitting}>

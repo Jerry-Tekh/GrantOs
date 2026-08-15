@@ -38,7 +38,7 @@ describe("GranteeSubmission", () => {
     expect(submitMilestone).not.toHaveBeenCalled();
   });
 
-  it("submits with trimmed evidence URLs capped at 5, matching the contract's MAX_EVIDENCE_URLS", async () => {
+  it("submits with trimmed evidence URLs capped at 3, matching the contract's MAX_EVIDENCE_URLS", async () => {
     submitMilestone.mockResolvedValue("0xTXHASH");
     const user = userEvent.setup();
     render(<GranteeSubmission />);
@@ -57,7 +57,7 @@ describe("GranteeSubmission", () => {
     const args = submitMilestone.mock.calls[0][2];
     expect(args.grantId).toBe("g1");
     expect(args.milestoneId).toBe("M1");
-    expect(args.evidenceUrls).toHaveLength(5);
+    expect(args.evidenceUrls).toHaveLength(3);
     expect(args.evidenceUrls[0]).toBe("https://github.com/a/b"); // trimmed
     expect(args.evidenceUrls).not.toContain("https://overflow.com");
 
@@ -80,12 +80,12 @@ describe("GranteeSubmission", () => {
     });
   });
 
-  it("shows a live URL count as the grantee types, and warns past the 5-URL cap", async () => {
+  it("shows a live URL count as the grantee types, and warns past the 3-URL cap", async () => {
     const user = userEvent.setup();
     render(<GranteeSubmission />);
     await user.type(screen.getByTestId("s-urls"), "a\nb\nc\nd\ne\nf");
-    expect(screen.getByText(/5\/5/)).toBeInTheDocument();
-    expect(screen.getByText(/Only the first 5 URLs will be submitted/)).toBeInTheDocument();
+    expect(screen.getByText(/3\/3/)).toBeInTheDocument();
+    expect(screen.getByText(/Only the first 3 URLs will be submitted/)).toBeInTheDocument();
   });
 });
 

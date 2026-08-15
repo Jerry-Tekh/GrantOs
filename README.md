@@ -6,7 +6,7 @@ GrantOS lets a funder escrow GEN for a grant, break it into sequential milestone
 
 - **Live app:** https://grant-os-one.vercel.app/
 - **Network:** GenLayer Bradbury testnet
-- **Contract:** [`0x68293343f39B04e7DBeC9eC6A438a39b931B7ce6`](deployments/bradbury.json)
+- **Contract:** [`0x0ddaFA2CF3d46B1Dab53186cB865AF063F6D0867`](deployments/bradbury.json)
 
 ---
 
@@ -52,7 +52,7 @@ The AI validators **fetch your evidence URLs and read their contents** against t
 
 - **Link to directly-fetchable content**, not to pages that only render via JavaScript. A raw source file, a README, a live demo endpoint, a published artifact, or an API response works well. A repo *landing page* that needs a browser to render may come back nearly empty to a fetcher.
 - **Make the report specific.** State exactly what was built and where in the evidence it can be seen ("the contract is in `contract/grantos.py`; the deployed address is X; the demo is live at Y").
-- **Up to 5 URLs** per submission — use them to cover each criterion.
+- **Up to 3 URLs** per submission — use them to cover each criterion. (The contract fetches and reads these inside the AI validators' time-bounded evaluation, so a few strong, directly-fetchable links beat many weak ones.)
 - If a verdict comes back `partial` or `not_completed`, read the feedback, strengthen the evidence, and resubmit.
 
 ## Architecture
@@ -127,7 +127,7 @@ npm run lint       # oxlint
 The contract address is read from `VITE_CONTRACT_ADDRESS` at **build time** (Vite inlines env vars into the bundle):
 
 1. In Vercel → **Settings → Environment Variables**, add
-   `VITE_CONTRACT_ADDRESS = 0x68293343f39B04e7DBeC9eC6A438a39b931B7ce6` for the **Production** environment.
+   `VITE_CONTRACT_ADDRESS = 0x0ddaFA2CF3d46B1Dab53186cB865AF063F6D0867` for the **Production** environment.
 2. **Redeploy** the frontend so the build picks it up.
 
 > Users can also paste the contract address into the header field at runtime, so the app works even without the env var — but setting it makes it the automatic default.
@@ -136,9 +136,8 @@ The contract address is read from `VITE_CONTRACT_ADDRESS` at **build time** (Vit
 
 The deployed contract is recorded in [`deployments/bradbury.json`](deployments/bradbury.json):
 
-- Contract: `0x68293343f39B04e7DBeC9eC6A438a39b931B7ce6`
-- Deployment tx: `0x6c86178a679c87c4a38693735355f3acc26f0e8f9021799b2576f43ba5b6b470`
-- Smoke-test tx: `0x11262e5ced34c195a9cfae4ad4cd0f5229e72fde33d4a2320272e829d1223c9b`
+- Contract: `0x0ddaFA2CF3d46B1Dab53186cB865AF063F6D0867`
+- Deployment tx: `0xae4f72d6f8f48993fcde8b6e707e05683a4db5539d3ee964bb05351d8b96391a`
 
 To deploy your own instance:
 

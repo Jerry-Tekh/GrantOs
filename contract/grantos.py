@@ -30,8 +30,15 @@ import json
 # ---------------------------------------------------------------------------
 QUALITY_AUTO_APPROVE_THRESHOLD = 70          # 0-100. Below this -> forced partial review.
 QUALITY_SCORE_TOLERANCE = 15                 # +/- tolerance validators allow between two LLM runs
-MAX_EVIDENCE_URLS = 5
-MAX_EVIDENCE_CHARS_PER_URL = 2000
+# Non-deterministic work is bounded so leader_fn stays within GenVM's leader
+# time budget. leader_fn fetches each evidence URL sequentially (this SDK has no
+# per-request timeout) then runs one LLM prompt, and every validator re-runs the
+# same function -- too many / too-large fetches or an oversized prompt are what
+# cause a "leader timeout" during consensus. Keeping the fetch count and the
+# total evidence size small is the reliable guard.
+MAX_EVIDENCE_URLS = 3                 # sequential fetches in the nondet block (was 5)
+MAX_EVIDENCE_CHARS_PER_URL = 1500     # per-URL slice kept for the prompt (was 2000)
+MAX_TOTAL_EVIDENCE_CHARS = 4500       # hard ceiling across all URLs; stop fetching once reached
 
 STATUS_ACTIVE = "active"
 STATUS_COMPLETED = "completed"
@@ -411,46 +418,41 @@ class GrantOS(gl.Contract):
 def _evaluate_milestone(project_description: str, milestone_title: str, milestone_criteria: str,
                          report_text: str, evidence_urls: list) -> dict:
     evidence = ""
+    total_chars = 0
     for url in evidence_urls:
+        # Stop early once the overall evidence budget is spent. This bounds the
+        # leader's non-deterministic work regardless of how large each page is,
+        # which is what keeps consensus from hitting a leader timeout.
+        if total_chars >= MAX_TOTAL_EVIDENCE_CHARS:
+            evidence += "\n\n--- (further evidence links skipped to stay within the evaluation time budget) ---"
+            break
         try:
+            # Plain-text GET (lightweight). Deliberately NOT gl.nondet.web.render,
+            # which spins up a headless browser and is far heavier per URL.
             page = gl.nondet.web.get(url)
             body = page.body
             if isinstance(body, (bytes, bytearray)):
                 body = body.decode("utf-8", errors="ignore")
-            evidence += f"\n\n--- Evidence from {url} ---\n{str(body)[:MAX_EVIDENCE_CHARS_PER_URL]}"
+            budget = min(MAX_EVIDENCE_CHARS_PER_URL, MAX_TOTAL_EVIDENCE_CHARS - total_chars)
+            snippet = str(body)[:budget]
+            total_chars += len(snippet)
+            evidence += f"\n\n--- Evidence from {url} ---\n{snippet}"
         except Exception as e:
             evidence += f"\n\n--- {url}: could not fetch ({e}) ---"
 
     prompt = f"""You are a grant milestone reviewer for a blockchain development grant program.
+Decide whether the milestone is genuinely complete, based on the report and the fetched evidence.
 
-PROJECT DESCRIPTION:
-"{project_description}"
-
-MILESTONE BEING EVALUATED:
-Title: "{milestone_title}"
-Success Criteria: "{milestone_criteria}"
-
-GRANTEE'S REPORT:
-"{report_text}"
-
+PROJECT: "{project_description}"
+MILESTONE: "{milestone_title}"
+SUCCESS CRITERIA: "{milestone_criteria}"
+GRANTEE REPORT: "{report_text}"
 EVIDENCE FROM SUBMITTED LINKS:{evidence}
 
-Evaluate whether this milestone has been genuinely completed.
+Judge honestly and thoroughly: does the evidence actually demonstrate the criteria are met, is the work substantive (not scaffolding or a placeholder), and is the quality sufficient for a funded milestone?
 
-Be honest and thorough. Check:
-1. Does the evidence actually demonstrate the milestone criteria are met?
-2. Is the work substantive (not just scaffolding or a placeholder)?
-3. Is the quality sufficient for a funded grant milestone?
-
-Respond ONLY with JSON, no other text:
-{{
-  "status": "completed" | "partial" | "not_completed",
-  "quality_score": 0-100,
-  "criteria_met": ["list of criteria that are demonstrably met"],
-  "criteria_not_met": ["list of criteria NOT yet met"],
-  "feedback": "3-4 sentences of specific, actionable feedback",
-  "confidence": "high" | "medium" | "low"
-}}"""
+Respond ONLY with this JSON, no other text:
+{{"status":"completed"|"partial"|"not_completed","quality_score":<0-100 integer>,"criteria_met":["criteria demonstrably met"],"criteria_not_met":["criteria not yet met"],"feedback":"2-3 sentences of specific, actionable feedback","confidence":"high"|"medium"|"low"}}"""
 
     raw = gl.nondet.exec_prompt(prompt, response_format="json")
     data = raw if isinstance(raw, dict) else json.loads(_extract_json(raw))

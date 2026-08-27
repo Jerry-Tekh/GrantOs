@@ -24,6 +24,7 @@ releases before switching back to DynArray.
 from genlayer import *
 from dataclasses import dataclass
 import json
+import time
 
 # ---------------------------------------------------------------------------
 # Named constants (session rule #5: no magic numbers)
@@ -31,14 +32,28 @@ import json
 QUALITY_AUTO_APPROVE_THRESHOLD = 70          # 0-100. Below this -> forced partial review.
 QUALITY_SCORE_TOLERANCE = 15                 # +/- tolerance validators allow between two LLM runs
 # Non-deterministic work is bounded so leader_fn stays within GenVM's leader
-# time budget. leader_fn fetches each evidence URL sequentially (this SDK has no
-# per-request timeout) then runs one LLM prompt, and every validator re-runs the
-# same function -- too many / too-large fetches or an oversized prompt are what
-# cause a "leader timeout" during consensus. Keeping the fetch count and the
-# total evidence size small is the reliable guard.
+# time budget. leader_fn fetches evidence URLs sequentially then runs one LLM
+# prompt, and every validator re-runs the same function, so slow or oversized
+# fetches are what surface as a "leader timeout" during consensus.
+#
+# Three independent bounds keep that work small. The third -- time -- is the one
+# the earlier size-only fix was missing:
+#   1. count -- at most MAX_EVIDENCE_URLS sequential fetches
+#   2. size  -- MAX_EVIDENCE_CHARS_PER_URL per page, MAX_TOTAL_EVIDENCE_CHARS overall
+#   3. time  -- MAX_EVIDENCE_FETCH_SECONDS wall-clock ceiling for the whole fetch
+#              phase, checked before every request
+#
+# Size caps alone do not help a *slow* response: gl.nondet.web.get (see
+# genlayer.nondet.web) exposes no socket timeout, and the GenVM runtime is
+# single-threaded WASI, so the contract cannot preempt a single in-flight host
+# request -- the node's own web-module request timeout is what backstops that.
+# What the contract *can* do, and now does, is stop starting new fetches once the
+# deadline passes, so slow pages can no longer compound across requests and push
+# the evaluation past the leader budget.
 MAX_EVIDENCE_URLS = 3                 # sequential fetches in the nondet block (was 5)
 MAX_EVIDENCE_CHARS_PER_URL = 1500     # per-URL slice kept for the prompt (was 2000)
 MAX_TOTAL_EVIDENCE_CHARS = 4500       # hard ceiling across all URLs; stop fetching once reached
+MAX_EVIDENCE_FETCH_SECONDS = 6.0      # wall-clock ceiling for the whole evidence-fetch phase
 
 STATUS_ACTIVE = "active"
 STATUS_COMPLETED = "completed"
@@ -419,12 +434,24 @@ def _evaluate_milestone(project_description: str, milestone_title: str, mileston
                          report_text: str, evidence_urls: list) -> dict:
     evidence = ""
     total_chars = 0
+    # Bounded fetch strategy (see the MAX_EVIDENCE_* notes above): the fetch phase
+    # is bounded by time as well as by count and size. Record a wall-clock deadline
+    # up front and stop *starting* new requests once it passes, so a slow evidence
+    # server cannot keep leader_fn open long enough to trip a leader timeout.
+    fetch_deadline = time.monotonic() + _evidence_fetch_budget_seconds()
     for url in evidence_urls:
         # Stop early once the overall evidence budget is spent. This bounds the
         # leader's non-deterministic work regardless of how large each page is,
         # which is what keeps consensus from hitting a leader timeout.
         if total_chars >= MAX_TOTAL_EVIDENCE_CHARS:
-            evidence += "\n\n--- (further evidence links skipped to stay within the evaluation time budget) ---"
+            evidence += "\n\n--- (further evidence links skipped: evidence size budget reached) ---"
+            break
+        # And stop once we are out of wall-clock time. Checking before each fetch
+        # means one slow page cannot be followed by more slow pages: the moment the
+        # deadline is crossed, remaining links are skipped and we go straight to the
+        # LLM step rather than draining every URL.
+        if time.monotonic() >= fetch_deadline:
+            evidence += "\n\n--- (further evidence links skipped: evaluation time budget reached) ---"
             break
         try:
             # Plain-text GET (lightweight). Deliberately NOT gl.nondet.web.render,
@@ -479,6 +506,25 @@ Respond ONLY with this JSON, no other text:
         "feedback": str(data.get("feedback", ""))[:1000],
         "confidence": confidence,
     }
+
+
+def _evidence_fetch_budget_seconds() -> float:
+    """Wall-clock budget for the whole evidence-fetch phase.
+
+    Returns MAX_EVIDENCE_FETCH_SECONDS on-chain. The value can be shrunk via the
+    GRANTOS_EVIDENCE_FETCH_BUDGET_SECONDS environment variable so the slow-response
+    regression test can drive the deadline without multi-second sleeps. GenVM does
+    not expose that variable and the os read is wrapped defensively, so on-chain the
+    constant always applies -- this is a test seam, never a production knob.
+    """
+    try:
+        import os
+        raw = os.environ.get("GRANTOS_EVIDENCE_FETCH_BUDGET_SECONDS")
+        if raw:
+            return max(0.0, float(raw))
+    except Exception:
+        pass
+    return MAX_EVIDENCE_FETCH_SECONDS
 
 
 def _extract_json(raw: str) -> str:

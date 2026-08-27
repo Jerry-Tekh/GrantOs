@@ -5,6 +5,8 @@ End-to-end tests for GrantOS, run against the real GenVM direct-mode engine
 Run with:  python3 test_grantos.py
 """
 import json
+import os
+import time
 import traceback
 from pathlib import Path
 
@@ -557,6 +559,81 @@ def test_negative_and_zero_amounts_rejected_with_clear_errors():
         check("zero total_amount is rejected", blocked)
 
 
+def test_slow_evidence_fetch_stays_within_time_budget():
+    print("\n[19] A slow evidence server cannot push the milestone evaluation past the leader time budget")
+    vm = new_vm()
+    funder = create_address("funder19")
+    grantee = create_address("grantee19")
+
+    # Reproduce the leader-timeout the size-only fix left open: evidence servers
+    # that accept the request but respond slowly. gl.nondet.web.get has no socket
+    # timeout, so before the wall-clock bound every one of these ran to completion,
+    # serially, inside leader_fn -- N slow pages meant N * delay of leader work.
+    PER_REQUEST_DELAY = 0.5          # each evidence server responds this slowly (seconds)
+    SUPPORTED_EXECUTION_LIMIT = 1.0  # the whole evaluation must finish within this wall-clock budget
+
+    # Shrink the contract's evidence-fetch budget so the deadline is crossed after
+    # the first slow page instead of the on-chain default. The contract reads this
+    # env var defensively and falls back to MAX_EVIDENCE_FETCH_SECONDS when unset
+    # (i.e. on-chain), so this only affects the test.
+    os.environ["GRANTOS_EVIDENCE_FETCH_BUDGET_SECONDS"] = "0.2"
+
+    fetch_calls = {"n": 0}
+
+    def slow_web(data):
+        fetch_calls["n"] += 1
+        time.sleep(PER_REQUEST_DELAY)
+        body = b"Milestone evidence: contract deployed to Bradbury and verified on the explorer."
+        return {"ok": {"response": {"status": 200, "headers": {}, "body": body}}}
+
+    try:
+        with vm.activate():
+            contract = deploy_contract(CONTRACT_PATH, vm, sdk_version=SDK_VERSION)
+            vm.sender = funder
+            vm.value = 100
+            contract.create_grant("g19", addr_str(grantee), "desc", ["M1"], ["t1"], ["c1"], [100], 100)
+            vm.value = 0
+
+            vm.sender = grantee
+            # No web mock is registered for these URLs, so the live handler above is
+            # what answers them -- that is where the slowness is injected.
+            vm._live_web_handler = slow_web
+            vm.mock_llm(r".*", llm_response("completed", 85))
+
+            # Three slow URLs. Unbounded, that is 3 * PER_REQUEST_DELAY = 1.5s of
+            # fetching alone, past SUPPORTED_EXECUTION_LIMIT. The bound must stop
+            # once the first fetch blows the 0.2s deadline.
+            evidence_urls = [
+                "https://slow.example/evidence-1",
+                "https://slow.example/evidence-2",
+                "https://slow.example/evidence-3",
+            ]
+
+            started = time.monotonic()
+            contract.submit_milestone("g19", "M1", "Deployed and verified.", evidence_urls)
+            elapsed = time.monotonic() - started
+
+            # 1. The evaluation actually completed and produced a stored verdict.
+            result = contract.get_milestone_result("g19", "M1")
+            check("evaluation completes and stores a verdict despite slow evidence",
+                  result.get("final_status") in ("completed", "partial", "not_completed"),
+                  f"result={result}")
+
+            # 2. It finished within the supported execution limit. Unbounded fetching
+            #    (~1.5s) would have blown this; the bounded strategy (~0.5s) stays under.
+            check("full evaluation finishes within the supported execution limit",
+                  elapsed < SUPPORTED_EXECUTION_LIMIT,
+                  f"elapsed={elapsed:.2f}s, limit={SUPPORTED_EXECUTION_LIMIT}s")
+
+            # 3. The bound actually engaged: fetching stopped after the deadline was
+            #    crossed instead of draining every slow URL.
+            check("bounded fetch stops starting requests once the time budget is spent",
+                  fetch_calls["n"] < len(evidence_urls),
+                  f"fetched {fetch_calls['n']} of {len(evidence_urls)} slow URLs")
+    finally:
+        os.environ.pop("GRANTOS_EVIDENCE_FETCH_BUDGET_SECONDS", None)
+
+
 if __name__ == "__main__":
     tests = [
         test_amount_mismatch_reverts,
@@ -577,6 +654,7 @@ if __name__ == "__main__":
         test_evaluation_seq_is_real_and_monotonic,
         test_colon_in_ids_rejected_to_prevent_key_collisions,
         test_negative_and_zero_amounts_rejected_with_clear_errors,
+        test_slow_evidence_fetch_stays_within_time_budget,
     ]
     for t in tests:
         try:

@@ -559,24 +559,34 @@ def test_negative_and_zero_amounts_rejected_with_clear_errors():
         check("zero total_amount is rejected", blocked)
 
 
-def test_slow_evidence_fetch_stays_within_time_budget():
-    print("\n[19] A slow evidence server cannot push the milestone evaluation past the leader time budget")
+def test_slow_single_request_halts_fetch_phase_within_budget():
+    print("\n[19] A single evidence request that runs past its per-request time budget halts the fetch phase -- one slow request can neither be followed by more fetches nor push the evaluation past the leader time budget")
     vm = new_vm()
     funder = create_address("funder19")
     grantee = create_address("grantee19")
 
-    # Reproduce the leader-timeout the size-only fix left open: evidence servers
-    # that accept the request but respond slowly. gl.nondet.web.get has no socket
-    # timeout, so before the wall-clock bound every one of these ran to completion,
-    # serially, inside leader_fn -- N slow pages meant N * delay of leader work.
-    PER_REQUEST_DELAY = 0.5          # each evidence server responds this slowly (seconds)
-    SUPPORTED_EXECUTION_LIMIT = 1.0  # the whole evaluation must finish within this wall-clock budget
+    # The reviewer's case: the old loop only checked the deadline *before* each
+    # request, so a request that was under the aggregate deadline was always
+    # followed by another fetch -- N moderately-slow pages compounded into N*delay
+    # of leader work. gl.nondet.web.get has no socket timeout, so each ran to
+    # completion serially inside leader_fn.
+    #
+    # The fix enforces a *per-request* ceiling (budget / MAX_EVIDENCE_URLS),
+    # checked the moment each call returns: the first request that overruns its own
+    # slice ends the phase immediately. Below, the budget is 0.9s so the per-request
+    # ceiling is 0.9/3 = 0.3s, and each server takes 0.4s, so:
+    #   * old behaviour   -> all 3 fetched (~1.2s): each 0.4s fetch was < the 0.9s
+    #                        aggregate, so the before-each-request check never tripped
+    #   * fixed behaviour -> exactly 1 fetch (~0.4s): the first overrun stops the phase
+    # This is what makes the test discriminate the fix from the regression instead
+    # of passing on both.
+    PER_REQUEST_DELAY = 0.4          # each evidence server responds this slowly (> the 0.3s per-request ceiling)
+    SUPPORTED_EXECUTION_LIMIT = 0.8  # the whole evaluation must finish within this wall-clock budget
 
-    # Shrink the contract's evidence-fetch budget so the deadline is crossed after
-    # the first slow page instead of the on-chain default. The contract reads this
-    # env var defensively and falls back to MAX_EVIDENCE_FETCH_SECONDS when unset
-    # (i.e. on-chain), so this only affects the test.
-    os.environ["GRANTOS_EVIDENCE_FETCH_BUDGET_SECONDS"] = "0.2"
+    # Shrink the contract's evidence-fetch budget (on-chain default is
+    # MAX_EVIDENCE_FETCH_SECONDS). The contract reads this env var defensively and
+    # derives the per-request ceiling from it, so this only affects the test.
+    os.environ["GRANTOS_EVIDENCE_FETCH_BUDGET_SECONDS"] = "0.9"  # -> per-request ceiling 0.3s
 
     fetch_calls = {"n": 0}
 
@@ -600,9 +610,8 @@ def test_slow_evidence_fetch_stays_within_time_budget():
             vm._live_web_handler = slow_web
             vm.mock_llm(r".*", llm_response("completed", 85))
 
-            # Three slow URLs. Unbounded, that is 3 * PER_REQUEST_DELAY = 1.5s of
-            # fetching alone, past SUPPORTED_EXECUTION_LIMIT. The bound must stop
-            # once the first fetch blows the 0.2s deadline.
+            # Three slow URLs. The old before-each-request loop drained all three
+            # (~1.2s); the per-request bound must stop after the first overrun.
             evidence_urls = [
                 "https://slow.example/evidence-1",
                 "https://slow.example/evidence-2",
@@ -615,23 +624,66 @@ def test_slow_evidence_fetch_stays_within_time_budget():
 
             # 1. The evaluation actually completed and produced a stored verdict.
             result = contract.get_milestone_result("g19", "M1")
-            check("evaluation completes and stores a verdict despite slow evidence",
+            check("evaluation completes and stores a verdict despite a slow request",
                   result.get("final_status") in ("completed", "partial", "not_completed"),
                   f"result={result}")
 
-            # 2. It finished within the supported execution limit. Unbounded fetching
-            #    (~1.5s) would have blown this; the bounded strategy (~0.5s) stays under.
+            # 2. A single request that overran its per-request slice halted the phase:
+            #    exactly one fetch was made, not all three. The old before-each-request
+            #    loop would have made all three (each was under the aggregate budget),
+            #    so this assertion fails on the pre-fix contract and passes on the fix.
+            check("a single over-budget request halts the fetch phase (one fetch, not all)",
+                  fetch_calls["n"] == 1,
+                  f"fetched {fetch_calls['n']} of {len(evidence_urls)} URLs (expected 1)")
+
+            # 3. The whole evaluation stayed within the supported execution limit.
+            #    Old behaviour (~1.2s of serial slow fetches) blows it; the per-request
+            #    bound (~0.4s) stays well under.
             check("full evaluation finishes within the supported execution limit",
                   elapsed < SUPPORTED_EXECUTION_LIMIT,
                   f"elapsed={elapsed:.2f}s, limit={SUPPORTED_EXECUTION_LIMIT}s")
-
-            # 3. The bound actually engaged: fetching stopped after the deadline was
-            #    crossed instead of draining every slow URL.
-            check("bounded fetch stops starting requests once the time budget is spent",
-                  fetch_calls["n"] < len(evidence_urls),
-                  f"fetched {fetch_calls['n']} of {len(evidence_urls)} slow URLs")
     finally:
         os.environ.pop("GRANTOS_EVIDENCE_FETCH_BUDGET_SECONDS", None)
+
+
+def test_single_hung_request_is_contained_not_fatal():
+    print("\n[20] A single evidence request the node aborts (its host-side web-module timeout on a hung socket) is contained to that URL; the evaluation still reaches the LLM step and stores a verdict")
+    vm = new_vm()
+    funder = create_address("funder20")
+    grantee = create_address("grantee20")
+
+    # Model the node's host-side behaviour for a socket that never responds:
+    # gl.nondet.web.get has no in-contract timeout, so a hung request is cut off by
+    # the node's web module and surfaces to the contract as a *catchable* error
+    # (genvm-web-default.lua reraises it non-fatal). The contract must contain that
+    # to the single URL rather than let it abort the whole evaluation.
+    def aborted_by_node_timeout(data):
+        raise RuntimeError("web request aborted by node web-module timeout")
+
+    with vm.activate():
+        contract = deploy_contract(CONTRACT_PATH, vm, sdk_version=SDK_VERSION)
+        vm.sender = funder
+        vm.value = 100
+        contract.create_grant("g20", addr_str(grantee), "desc", ["M1"], ["t1"], ["c1"], [100], 100)
+        vm.value = 0
+
+        vm.sender = grantee
+        vm._live_web_handler = aborted_by_node_timeout
+        vm.mock_llm(r".*", llm_response("partial", 60))
+
+        # A single evidence URL whose fetch is aborted host-side. If the abort were
+        # not contained, submit_milestone would raise and no verdict would be stored.
+        contract.submit_milestone(
+            "g20", "M1", "Deployed; evidence link provided.",
+            ["https://hung.example/evidence"],
+        )
+
+        result = contract.get_milestone_result("g20", "M1")
+        check("a single aborted/hung request does not abort the whole evaluation",
+              result != {}, f"result={result}")
+        check("the evaluation still reaches the LLM step and stores a verdict",
+              result.get("llm_status") == "partial",
+              f"llm_status={result.get('llm_status')}")
 
 
 if __name__ == "__main__":
@@ -654,7 +706,8 @@ if __name__ == "__main__":
         test_evaluation_seq_is_real_and_monotonic,
         test_colon_in_ids_rejected_to_prevent_key_collisions,
         test_negative_and_zero_amounts_rejected_with_clear_errors,
-        test_slow_evidence_fetch_stays_within_time_budget,
+        test_slow_single_request_halts_fetch_phase_within_budget,
+        test_single_hung_request_is_contained_not_fatal,
     ]
     for t in tests:
         try:

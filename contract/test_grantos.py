@@ -5,8 +5,6 @@ End-to-end tests for GrantOS, run against the real GenVM direct-mode engine
 Run with:  python3 test_grantos.py
 """
 import json
-import os
-import time
 import traceback
 from pathlib import Path
 
@@ -559,106 +557,78 @@ def test_negative_and_zero_amounts_rejected_with_clear_errors():
         check("zero total_amount is rejected", blocked)
 
 
-def test_slow_single_request_halts_fetch_phase_within_budget():
-    print("\n[19] A single evidence request that runs past its per-request time budget halts the fetch phase -- one slow request can neither be followed by more fetches nor push the evaluation past the leader time budget")
+def test_evaluation_performs_no_web_io():
+    print("\n[19] Milestone evaluation performs no web I/O: reference links are judged from on-chain data and are never fetched, so no host request can be in flight during consensus -- the whole 'a single request stays open past the budget' class is eliminated, not merely bounded")
     vm = new_vm()
     funder = create_address("funder19")
     grantee = create_address("grantee19")
 
-    # The reviewer's case: the old loop only checked the deadline *before* each
-    # request, so a request that was under the aggregate deadline was always
-    # followed by another fetch -- N moderately-slow pages compounded into N*delay
-    # of leader work. gl.nondet.web.get has no socket timeout, so each ran to
-    # completion serially inside leader_fn.
-    #
-    # The fix enforces a *per-request* ceiling (budget / MAX_EVIDENCE_URLS),
-    # checked the moment each call returns: the first request that overruns its own
-    # slice ends the phase immediately. Below, the budget is 0.9s so the per-request
-    # ceiling is 0.9/3 = 0.3s, and each server takes 0.4s, so:
-    #   * old behaviour   -> all 3 fetched (~1.2s): each 0.4s fetch was < the 0.9s
-    #                        aggregate, so the before-each-request check never tripped
-    #   * fixed behaviour -> exactly 1 fetch (~0.4s): the first overrun stops the phase
-    # This is what makes the test discriminate the fix from the regression instead
-    # of passing on both.
-    PER_REQUEST_DELAY = 0.4          # each evidence server responds this slowly (> the 0.3s per-request ceiling)
-    SUPPORTED_EXECUTION_LIMIT = 0.8  # the whole evaluation must finish within this wall-clock budget
+    # The reviewer's remaining objection was that a contract cannot bound a web
+    # request that is *already in flight*: gl.nondet.web.get exposes no socket
+    # timeout and the GenVM guest is single-threaded WASI, so the elapsed-time
+    # check can only run *after* a call returns. The re-architecture removes the
+    # dependency entirely -- evaluation reads only on-chain data (the report plus
+    # the reference links submitted with it) and dereferences no URL. This test
+    # pins that invariant: any web call during submit_milestone is a hard failure.
+    web_calls = {"n": 0}
 
-    # Shrink the contract's evidence-fetch budget (on-chain default is
-    # MAX_EVIDENCE_FETCH_SECONDS). The contract reads this env var defensively and
-    # derives the per-request ceiling from it, so this only affects the test.
-    os.environ["GRANTOS_EVIDENCE_FETCH_BUDGET_SECONDS"] = "0.9"  # -> per-request ceiling 0.3s
+    def forbid_web(data):
+        web_calls["n"] += 1
+        # Fail loudly if the contract ever reaches the host web module. If this
+        # regressed to fetching, the count would be non-zero regardless of what
+        # we return here.
+        raise AssertionError("contract must not perform web I/O during evaluation")
 
-    fetch_calls = {"n": 0}
+    with vm.activate():
+        contract = deploy_contract(CONTRACT_PATH, vm, sdk_version=SDK_VERSION)
+        vm.sender = funder
+        vm.value = 100
+        contract.create_grant("g19", addr_str(grantee), "desc", ["M1"], ["t1"], ["c1"], [100], 100)
+        vm.value = 0
 
-    def slow_web(data):
-        fetch_calls["n"] += 1
-        time.sleep(PER_REQUEST_DELAY)
-        body = b"Milestone evidence: contract deployed to Bradbury and verified on the explorer."
-        return {"ok": {"response": {"status": 200, "headers": {}, "body": body}}}
+        vm.sender = grantee
+        # If evaluation tried to fetch any of the reference links, this live handler
+        # would run and raise. It must never be invoked.
+        vm._live_web_handler = forbid_web
+        vm.mock_llm(r".*", llm_response("completed", 85))
 
-    try:
-        with vm.activate():
-            contract = deploy_contract(CONTRACT_PATH, vm, sdk_version=SDK_VERSION)
-            vm.sender = funder
-            vm.value = 100
-            contract.create_grant("g19", addr_str(grantee), "desc", ["M1"], ["t1"], ["c1"], [100], 100)
-            vm.value = 0
+        # Submit WITH reference links -- exactly the input that used to trigger the
+        # fetch loop. They are recorded and shown to the model for audit, not fetched.
+        contract.submit_milestone(
+            "g19", "M1",
+            "Deployed to Bradbury at 0x0ddaFA2CF3d46B1Dab53186cB865AF063F6D0867; "
+            "release tx 0xabc123; repo commit deadbeef.",
+            [
+                "https://explorer.example/tx/0xabc123",
+                "https://github.com/example/grantos/commit/deadbeef",
+                "https://project.example/milestone-1",
+            ],
+        )
 
-            vm.sender = grantee
-            # No web mock is registered for these URLs, so the live handler above is
-            # what answers them -- that is where the slowness is injected.
-            vm._live_web_handler = slow_web
-            vm.mock_llm(r".*", llm_response("completed", 85))
+        # 1. Evaluation completed and stored a verdict from on-chain data alone.
+        result = contract.get_milestone_result("g19", "M1")
+        check("evaluation completes and stores a verdict from on-chain data",
+              result.get("final_status") in ("completed", "partial", "not_completed"),
+              f"result={result}")
 
-            # Three slow URLs. The old before-each-request loop drained all three
-            # (~1.2s); the per-request bound must stop after the first overrun.
-            evidence_urls = [
-                "https://slow.example/evidence-1",
-                "https://slow.example/evidence-2",
-                "https://slow.example/evidence-3",
-            ]
-
-            started = time.monotonic()
-            contract.submit_milestone("g19", "M1", "Deployed and verified.", evidence_urls)
-            elapsed = time.monotonic() - started
-
-            # 1. The evaluation actually completed and produced a stored verdict.
-            result = contract.get_milestone_result("g19", "M1")
-            check("evaluation completes and stores a verdict despite a slow request",
-                  result.get("final_status") in ("completed", "partial", "not_completed"),
-                  f"result={result}")
-
-            # 2. A single request that overran its per-request slice halted the phase:
-            #    exactly one fetch was made, not all three. The old before-each-request
-            #    loop would have made all three (each was under the aggregate budget),
-            #    so this assertion fails on the pre-fix contract and passes on the fix.
-            check("a single over-budget request halts the fetch phase (one fetch, not all)",
-                  fetch_calls["n"] == 1,
-                  f"fetched {fetch_calls['n']} of {len(evidence_urls)} URLs (expected 1)")
-
-            # 3. The whole evaluation stayed within the supported execution limit.
-            #    Old behaviour (~1.2s of serial slow fetches) blows it; the per-request
-            #    bound (~0.4s) stays well under.
-            check("full evaluation finishes within the supported execution limit",
-                  elapsed < SUPPORTED_EXECUTION_LIMIT,
-                  f"elapsed={elapsed:.2f}s, limit={SUPPORTED_EXECUTION_LIMIT}s")
-    finally:
-        os.environ.pop("GRANTOS_EVIDENCE_FETCH_BUDGET_SECONDS", None)
+        # 2. No web request was ever made -- so the 'in-flight request past the
+        #    budget' case the reviewer described cannot occur: there is no request.
+        check("no web request is made during evaluation (in-flight case cannot exist)",
+              web_calls["n"] == 0,
+              f"web handler was called {web_calls['n']} time(s), expected 0")
 
 
-def test_single_hung_request_is_contained_not_fatal():
-    print("\n[20] A single evidence request the node aborts (its host-side web-module timeout on a hung socket) is contained to that URL; the evaluation still reaches the LLM step and stores a verdict")
+def test_evaluation_without_reference_links_still_evaluates():
+    print("\n[20] Evaluation with no reference links still runs on the report alone (references rendered as '(none provided)') and stores a verdict -- and still performs no web I/O")
     vm = new_vm()
     funder = create_address("funder20")
     grantee = create_address("grantee20")
 
-    # Model the node's host-side behaviour for a socket that never responds:
-    # gl.nondet.web.get has no in-contract timeout, so a hung request is cut off by
-    # the node's web module and surfaces to the contract as a *catchable* error
-    # (genvm-web-default.lua reraises it non-fatal). The contract must contain that
-    # to the single URL rather than let it abort the whole evaluation.
-    def aborted_by_node_timeout(data):
-        raise RuntimeError("web request aborted by node web-module timeout")
+    web_calls = {"n": 0}
+
+    def forbid_web(data):
+        web_calls["n"] += 1
+        raise AssertionError("contract must not perform web I/O during evaluation")
 
     with vm.activate():
         contract = deploy_contract(CONTRACT_PATH, vm, sdk_version=SDK_VERSION)
@@ -668,22 +638,19 @@ def test_single_hung_request_is_contained_not_fatal():
         vm.value = 0
 
         vm.sender = grantee
-        vm._live_web_handler = aborted_by_node_timeout
+        vm._live_web_handler = forbid_web
         vm.mock_llm(r".*", llm_response("partial", 60))
 
-        # A single evidence URL whose fetch is aborted host-side. If the abort were
-        # not contained, submit_milestone would raise and no verdict would be stored.
-        contract.submit_milestone(
-            "g20", "M1", "Deployed; evidence link provided.",
-            ["https://hung.example/evidence"],
-        )
+        # No reference links at all -- exercises the "(none provided)" branch.
+        contract.submit_milestone("g20", "M1", "Work described in the report; no links attached.", [])
 
         result = contract.get_milestone_result("g20", "M1")
-        check("a single aborted/hung request does not abort the whole evaluation",
-              result != {}, f"result={result}")
-        check("the evaluation still reaches the LLM step and stores a verdict",
+        check("evaluation with no reference links still stores a verdict",
               result.get("llm_status") == "partial",
-              f"llm_status={result.get('llm_status')}")
+              f"result={result}")
+        check("no web request is made when there are no reference links",
+              web_calls["n"] == 0,
+              f"web handler was called {web_calls['n']} time(s), expected 0")
 
 
 if __name__ == "__main__":
@@ -706,8 +673,8 @@ if __name__ == "__main__":
         test_evaluation_seq_is_real_and_monotonic,
         test_colon_in_ids_rejected_to_prevent_key_collisions,
         test_negative_and_zero_amounts_rejected_with_clear_errors,
-        test_slow_single_request_halts_fetch_phase_within_budget,
-        test_single_hung_request_is_contained_not_fatal,
+        test_evaluation_performs_no_web_io,
+        test_evaluation_without_reference_links_still_evaluates,
     ]
     for t in tests:
         try:

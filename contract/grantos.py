@@ -24,49 +24,35 @@ releases before switching back to DynArray.
 from genlayer import *
 from dataclasses import dataclass
 import json
-import time
 
 # ---------------------------------------------------------------------------
 # Named constants (session rule #5: no magic numbers)
 # ---------------------------------------------------------------------------
 QUALITY_AUTO_APPROVE_THRESHOLD = 70          # 0-100. Below this -> forced partial review.
 QUALITY_SCORE_TOLERANCE = 15                 # +/- tolerance validators allow between two LLM runs
-# Non-deterministic work is bounded so leader_fn stays within GenVM's leader
-# time budget. leader_fn fetches evidence URLs sequentially then runs one LLM
-# prompt, and every validator re-runs the same function, so a slow or oversized
-# fetch is what surfaces as a "leader timeout" during consensus.
+# The milestone evaluation runs inside a GenLayer nondet block (leader_fn, re-run
+# by every validator). The ONLY non-deterministic operation it performs is a single
+# LLM call (gl.nondet.exec_prompt); the Equivalence Principle reconciles the
+# leader's and validators' outputs.
 #
-# gl.nondet.web.get (see genlayer.nondet.web) exposes no socket timeout, and the
-# GenVM runtime is single-threaded WASI, so the guest cannot abort a request that
-# is already in flight. A single request is therefore bounded by two cooperating
-# limits rather than by one before-the-call deadline check:
-#   * host side -- the node's web module enforces its own per-request timeout and
-#     returns it as a *catchable* error (genvm-web-default.lua raises it via
-#     reraise_with_fatality(result, false), i.e. non-fatal), so a truly hung
-#     socket is cut off by the node and caught per URL below; one dead or hung
-#     link can never end the whole evaluation.
-#   * contract side -- no single request is *allowed* to cost more than
-#     MAX_EVIDENCE_FETCH_SECONDS_PER_URL of the phase. That ceiling is checked the
-#     moment the call returns (not only before it starts), and the phase stops on
-#     the first overrun instead of starting any further work.
+# It deliberately performs NO web I/O. gl.nondet.web.get exposes no timeout and the
+# GenVM guest is single-threaded WASI, so a contract can never bound a web request
+# that is already in flight -- only the node can, host-side, after the fact. Rather
+# than depend on that, evidence is evaluated entirely from on-chain data: the
+# grantee's report plus the reference links submitted with it. This has two payoffs:
+#   * there is no in-flight host request in the consensus path, so the whole class
+#     of "a single request stays open past the budget" cannot occur -- it is
+#     eliminated, not merely bounded; and
+#   * the leader and every validator evaluate the exact same on-chain bytes, so a
+#     live page that answered differently per node can no longer break consensus.
+# Reference links are recorded and shown to the model for human/validator audit;
+# they are never dereferenced on-chain.
 #
-# Four bounds keep the phase small. The per-request time ceiling (#3) is the one
-# the earlier "check the deadline only before each request" fix was missing:
-#   1. count          -- at most MAX_EVIDENCE_URLS sequential fetches
-#   2. size           -- MAX_EVIDENCE_CHARS_PER_URL per page, MAX_TOTAL_EVIDENCE_CHARS overall
-#   3. per-request time-- MAX_EVIDENCE_FETCH_SECONDS_PER_URL for any one request;
-#                         the phase ends the instant a single request exceeds it
-#   4. total time     -- MAX_EVIDENCE_FETCH_SECONDS across the whole phase. By
-#                         construction count * per-request ceiling == total, so even
-#                         the worst case (every request runs right up to its ceiling)
-#                         lands on the budget, never past it.
-MAX_EVIDENCE_URLS = 3                        # sequential fetches in the nondet block (was 5)
-MAX_EVIDENCE_CHARS_PER_URL = 1500            # per-URL slice kept for the prompt (was 2000)
-MAX_TOTAL_EVIDENCE_CHARS = 4500              # hard ceiling across all URLs; stop fetching once reached
-MAX_EVIDENCE_FETCH_SECONDS_PER_URL = 2.0     # hard wall-clock ceiling for any single request
-MAX_EVIDENCE_FETCH_SECONDS = (                # aggregate ceiling for the whole fetch phase
-    MAX_EVIDENCE_URLS * MAX_EVIDENCE_FETCH_SECONDS_PER_URL  # == 6.0; derived so the two stay consistent
-)
+# Prompt inputs are size-bounded so an oversized on-chain report cannot inflate the
+# non-deterministic payload.
+MAX_EVIDENCE_URLS = 3            # reference links recorded per submission and shown to the model
+MAX_EVIDENCE_URL_CHARS = 300     # per-link character cap in the prompt
+MAX_REPORT_CHARS = 6000          # grantee-report character cap in the prompt
 
 STATUS_ACTIVE = "active"
 STATUS_COMPLETED = "completed"
@@ -445,64 +431,29 @@ class GrantOS(gl.Contract):
 # ---------------------------------------------------------------------------
 def _evaluate_milestone(project_description: str, milestone_title: str, milestone_criteria: str,
                          report_text: str, evidence_urls: list) -> dict:
-    evidence = ""
-    total_chars = 0
-    # Bounded fetch strategy (see the MAX_EVIDENCE_* notes above). The phase is
-    # bounded four ways: count, per-URL size, total size, and -- the part the
-    # earlier fix was missing -- time, bounded both *per request* and in aggregate.
-    budget_seconds = _evidence_fetch_budget_seconds()
-    # No single request may consume more than its equal share of the phase budget.
-    # Because the per-request ceiling is budget / count, the worst case (every
-    # request runs right up to the ceiling) still lands on the total budget.
-    per_fetch_ceiling = budget_seconds / max(1, MAX_EVIDENCE_URLS)
-    phase_deadline = time.monotonic() + budget_seconds
-    for url in evidence_urls:
-        # Stop early once the overall evidence budget is spent. This bounds the
-        # leader's non-deterministic work regardless of how large each page is.
-        if total_chars >= MAX_TOTAL_EVIDENCE_CHARS:
-            evidence += "\n\n--- (further evidence links skipped: evidence size budget reached) ---"
-            break
-        # Stop once the whole phase is out of wall-clock time.
-        if time.monotonic() >= phase_deadline:
-            evidence += "\n\n--- (further evidence links skipped: evaluation time budget reached) ---"
-            break
-        fetch_started = time.monotonic()
-        try:
-            # Plain-text GET (lightweight). Deliberately NOT gl.nondet.web.render,
-            # which spins up a headless browser and is far heavier per URL.
-            page = gl.nondet.web.get(url)
-            body = page.body
-            if isinstance(body, (bytes, bytearray)):
-                body = body.decode("utf-8", errors="ignore")
-            budget = min(MAX_EVIDENCE_CHARS_PER_URL, MAX_TOTAL_EVIDENCE_CHARS - total_chars)
-            snippet = str(body)[:budget]
-            total_chars += len(snippet)
-            evidence += f"\n\n--- Evidence from {url} ---\n{snippet}"
-        except Exception as e:
-            # gl.nondet.web.get has no socket timeout, so a hung request is aborted
-            # host-side by the node's web module and surfaces here as a catchable
-            # error. Contain it to this one URL instead of ending the evaluation.
-            evidence += f"\n\n--- {url}: could not fetch ({e}) ---"
-        # Enforce the per-request ceiling the *moment the call returns* -- not only
-        # before the next one starts. A single request that ran longer than its
-        # slice ends the fetch phase right here, so one slow request can neither be
-        # followed by more fetches nor drag the total past the leader budget. This
-        # is the guarantee the old "check the deadline only before each request"
-        # loop could not make about an individual in-flight request.
-        if time.monotonic() - fetch_started >= per_fetch_ceiling:
-            evidence += "\n\n--- (further evidence links skipped: a single request exceeded its time budget) ---"
-            break
+    # No web I/O (see the module header): evidence is judged from on-chain data
+    # only -- the grantee's report and the reference links submitted with it. The
+    # links are shown to the model as references for human/validator audit; they
+    # are NOT fetched here, so no host request is ever in flight during consensus.
+    report = str(report_text)[:MAX_REPORT_CHARS]
+    if evidence_urls:
+        references = "\n".join(
+            f"- {str(u)[:MAX_EVIDENCE_URL_CHARS]}" for u in evidence_urls
+        )
+    else:
+        references = "(none provided)"
 
     prompt = f"""You are a grant milestone reviewer for a blockchain development grant program.
-Decide whether the milestone is genuinely complete, based on the report and the fetched evidence.
+Decide whether the milestone is genuinely complete, based on the grantee's report and the reference links they provided.
 
 PROJECT: "{project_description}"
 MILESTONE: "{milestone_title}"
 SUCCESS CRITERIA: "{milestone_criteria}"
-GRANTEE REPORT: "{report_text}"
-EVIDENCE FROM SUBMITTED LINKS:{evidence}
+GRANTEE REPORT: "{report}"
+REFERENCE LINKS (provided by the grantee for audit; not fetched on-chain):
+{references}
 
-Judge honestly and thoroughly: does the evidence actually demonstrate the criteria are met, is the work substantive (not scaffolding or a placeholder), and is the quality sufficient for a funded milestone?
+Judge honestly and thoroughly. Reward concrete, independently checkable evidence in the report -- commit hashes, transaction hashes, deployed contract addresses, explorer links, precise descriptions of what was built. Treat vague or unverifiable claims, scaffolding, or placeholders as insufficient, and a report with no specific checkable evidence must not be scored "completed". Consider whether the work is substantive and of sufficient quality for a funded milestone.
 
 Respond ONLY with this JSON, no other text:
 {{"status":"completed"|"partial"|"not_completed","quality_score":<0-100 integer>,"criteria_met":["criteria demonstrably met"],"criteria_not_met":["criteria not yet met"],"feedback":"2-3 sentences of specific, actionable feedback","confidence":"high"|"medium"|"low"}}"""
@@ -532,28 +483,6 @@ Respond ONLY with this JSON, no other text:
         "feedback": str(data.get("feedback", ""))[:1000],
         "confidence": confidence,
     }
-
-
-def _evidence_fetch_budget_seconds() -> float:
-    """Wall-clock budget for the whole evidence-fetch phase.
-
-    Returns MAX_EVIDENCE_FETCH_SECONDS on-chain. The per-request ceiling used in
-    the fetch loop is derived from this value (budget / MAX_EVIDENCE_URLS), so this
-    single knob bounds both an individual request and the phase as a whole. The
-    value can be shrunk via the GRANTOS_EVIDENCE_FETCH_BUDGET_SECONDS environment
-    variable so the slow-response regression tests can drive the deadline without
-    multi-second sleeps. GenVM does not expose that variable and the os read is
-    wrapped defensively, so on-chain the constant always applies -- this is a test
-    seam, never a production knob.
-    """
-    try:
-        import os
-        raw = os.environ.get("GRANTOS_EVIDENCE_FETCH_BUDGET_SECONDS")
-        if raw:
-            return max(0.0, float(raw))
-    except Exception:
-        pass
-    return MAX_EVIDENCE_FETCH_SECONDS
 
 
 def _extract_json(raw: str) -> str:
